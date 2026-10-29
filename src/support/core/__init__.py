@@ -1,0 +1,28 @@
+"""Core module containing shared configurations, exceptions, dialects, and logging."""
+
+from support.core.config import AppConfig
+from support.core.dialect import Dialect
+from support.core.exceptions import (
+    SupportError,
+    InvalidPathError,
+    UnreadableFileError,
+    SQLParseError,
+    UnsupportedDialectError,
+    EmptySchemaError,
+    DatabaseAccessError,
+)
+from support.core.logging import setup_logging, logger
+
+__all__ = [
+    "AppConfig",
+    "Dialect",
+    "SupportError",
+    "InvalidPathError",
+    "UnreadableFileError",
+    "SQLParseError",
+    "UnsupportedDialectError",
+    "EmptySchemaError",
+    "DatabaseAccessError",
+    "setup_logging",
+    "logger",
+]

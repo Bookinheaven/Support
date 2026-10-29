@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "support"
+version = "0.1.0"
+description = "A modular, extensible, multi-database natural-language-to-SQL application."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Support Team" }
+]
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=14.0.0",
+    "pydantic>=2.7.0",
+    "sqlglot>=30.0.0",
+    "sqlalchemy>=2.0.0",
+    "keyring>=25.0.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg>=3.1.0"]
+mysql = ["pymysql>=1.1.0"]
+mssql = ["pymssql>=2.3.0"]
+all-drivers = [
+    "psycopg>=3.1.0",
+    "pymysql>=1.1.0",
+    "pymssql>=2.3.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+support = "support.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
