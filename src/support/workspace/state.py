@@ -42,6 +42,8 @@ class WorkspaceSessionState:
         self.model_check_id: int = 0
         self.model_generation_tested: bool = False
         self.model_generation_status: Optional[str] = None
+        self.cached_schema: Optional[Any] = None
+        self.last_query_draft: Optional[Any] = None
 
         self.history: list[ChatMessage] = []
         self.current_task: Optional[str] = None
@@ -85,6 +87,8 @@ class WorkspaceSessionState:
         self.db_check_id += 1  # Invalidate pending background checks for prior database
         self.database_status = status or ("Checking..." if name else "No databases configured")
         self.db_details = None
+        self.cached_schema = None
+        self.last_query_draft = None
         self.notify_status_changed()
 
     def set_database_status(

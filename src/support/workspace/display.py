@@ -179,8 +179,9 @@ def display_workspace_help() -> None:
     table.add_column("Command", style="bold white", no_wrap=True)
     table.add_column("Description", style="white")
 
-    table.add_row("/help", "Display available commands and workspace guidance")
     table.add_row("/status", "Display or refresh active database and model connectivity status")
+    table.add_row("/schema", "Inspect or refresh discovered schema for the active database (/schema [refresh])")
+    table.add_row("/run", "Review safeguards and execute the latest approved read-only query draft")
     table.add_row("/db", "Inspect, test, add, or switch active database connection profile")
     table.add_row("/model", "Inspect and switch the active LLM provider and model for this session")
     table.add_row("/clear", "Clear visible terminal screen and redisplay workspace header")
@@ -189,7 +190,8 @@ def display_workspace_help() -> None:
     console.print()
     console.print("[bold cyan]Workspace Slash Commands[/bold cyan]")
     console.print(table)
-    console.print("[dim]Or enter natural language questions directly at the prompt.[/dim]")
+    console.print("[dim]Enter natural-language questions directly at the prompt to generate draft SQL.[/dim]")
+    console.print("[dim]Queries remain unexecuted drafts until explicitly approved and run via /run.[/dim]")
     console.print()
 
 
