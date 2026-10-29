@@ -26,3 +26,5 @@ class QueryDraft:
     unknown_columns: list[str] = field(default_factory=list)
     schema_coverage: str = ""
     raw_response: Optional[str] = None
+    correction_notes: Optional[str] = None
+    repair_attempts: int = 0

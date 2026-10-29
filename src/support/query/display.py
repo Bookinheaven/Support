@@ -16,10 +16,34 @@ if TYPE_CHECKING:
     from support.query.executor import ExecutionConfig, QueryResult
 
 
-def display_query_draft(draft: QueryDraft) -> None:
-    """Render a generated SQL query draft with explanation, validation, schema alignment, and execution status."""
+def display_query_draft(
+    draft: QueryDraft,
+    db_name: Optional[str] = None,
+    dialect_name: Optional[str] = None,
+    max_rows: int = 100,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Render a concise conversational query draft preview with safety summary."""
     console.print()
 
+    # 1. Concise state header
+    if not draft.is_validated:
+        reason = draft.validation_status
+        if reason.startswith("Rejected: "):
+            reason = reason[10:]
+        console.print(f"[bold red]Query rejected · {reason}[/bold red]")
+    elif draft.is_schema_verified is True:
+        console.print("[bold green]Query ready · Schema verified[/bold green]")
+    elif draft.is_schema_verified is False:
+        console.print("[bold yellow]Draft ready · Schema needs clarification[/bold yellow]")
+    else:
+        console.print("[bold cyan]Draft ready[/bold cyan]")
+
+    # 2. Original question
+    if draft.question:
+        console.print(f"[bold white]Question:[/bold white] [dim]{draft.question}[/dim]")
+
+    # 3. Formatted SQL
     if draft.sql:
         console.print("[bold white]Draft SQL[/bold white]")
         console.print("[dim]--------[/dim]")
@@ -33,44 +57,82 @@ def display_query_draft(draft: QueryDraft) -> None:
         console.print(syntax)
         console.print()
 
+    # 4. Explanation
     if draft.explanation:
-        console.print("[bold white]Explanation:[/bold white]")
-        console.print(f"[white]{draft.explanation}[/white]")
+        console.print(f"[bold white]Explanation:[/bold white] {draft.explanation}")
         console.print()
 
-    if draft.schema_coverage and "subset" in draft.schema_coverage.lower():
-        console.print(f"[dim]Schema Context: {draft.schema_coverage}[/dim]")
+    # 5. Correction note if applicable
+    if draft.correction_notes:
+        console.print(f"[dim cyan]Correction note: {draft.correction_notes}[/dim cyan]")
+        console.print()
 
-    # 1. Parsing status
-    if draft.sql and draft.is_parsed:
-        console.print("[bold white]Parsing:   [/bold white] [green]Successful[/green]")
-    elif draft.sql and not draft.is_parsed:
-        console.print("[bold white]Parsing:   [/bold white] [red]Failed[/red]")
+    # 6. Compact safety summary
+    active_db = db_name or (draft.dialect if draft.dialect != "unknown" else "active database")
+    dialect_str = f" ({dialect_name})" if dialect_name and dialect_name != active_db else ""
+    console.print(
+        f"[dim]Database: {active_db}{dialect_str} · Read-only: Enforced · Limits: Max {max_rows} rows, Timeout {timeout_seconds:.1f}s[/dim]"
+    )
 
-    # 2. Structural/read-only validation
-    if draft.is_validated:
-        console.print("[bold white]Validation:[/bold white] [bold green]Passed[/bold green]")
-    else:
-        reason = draft.validation_status
-        if not reason.startswith("Rejected"):
-            reason = f"Rejected: {reason}"
-        console.print(f"[bold white]Validation:[/bold white] [bold red]{reason}[/bold red]")
-
-    # 3. Schema alignment
-    if draft.is_schema_verified is True:
-        console.print(f"[bold white]Schema:    [/bold white] [green]{draft.schema_status}[/green]")
-    elif draft.is_schema_verified is False:
-        console.print(f"[bold white]Schema:    [/bold white] [yellow]{draft.schema_status}[/yellow]")
-    elif draft.schema_status != "Not checked":
-        console.print(f"[bold white]Schema:    [/bold white] [dim]{draft.schema_status}[/dim]")
-
-    # 4. Execution status
-    console.print(f"[bold white]Execution: [/bold white] [dim]{draft.execution_status}[/dim]")
-
-    if draft.is_validated and draft.is_schema_verified is True:
-        console.print("[dim]Use [bold white]/run[/bold white] to review safeguards and execute this query.[/dim]")
+    # 7. Schema verification status
+    if draft.schema_status and draft.schema_status != "Not checked":
+        console.print(f"[dim]Schema status: {draft.schema_status}[/dim]")
 
     console.print()
+
+
+def display_query_details(
+    draft: QueryDraft,
+    db_name: Optional[str] = None,
+) -> None:
+    """Render full diagnostic information for the current query draft on demand (/details)."""
+    console.print()
+    console.print("[bold cyan]Query Draft Diagnostics[/bold cyan]")
+    console.print("[dim]------------------------------------------------------------[/dim]")
+
+    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    table.add_column("Property", style="bold white", width=22)
+    table.add_column("Value")
+
+    table.add_row("Question", draft.question or "[dim]N/A[/dim]")
+    table.add_row("Database / Dialect", f"{db_name or 'N/A'} ({draft.dialect})")
+
+    provider_model = f"{draft.provider} / {draft.model}" if draft.provider else "[dim]N/A[/dim]"
+    table.add_row("LLM Provider / Model", provider_model)
+
+    parse_val = "[green]Successful[/green]" if draft.is_parsed else "[red]Failed[/red]"
+    table.add_row("Parsing", parse_val)
+
+    val_style = "green" if draft.is_validated else "red"
+    table.add_row("Validation Status", f"[{val_style}]{draft.validation_status}[/{val_style}]")
+
+    if draft.is_schema_verified is True:
+        schema_val = f"[green]Verified[/green] ({draft.schema_status})"
+    elif draft.is_schema_verified is False:
+        schema_val = f"[yellow]Needs clarification[/yellow] ({draft.schema_status})"
+    else:
+        schema_val = f"[dim]{draft.schema_status}[/dim]"
+    table.add_row("Schema Verification", schema_val)
+
+    if draft.schema_coverage:
+        table.add_row("Schema Context", draft.schema_coverage)
+
+    if draft.tables_used:
+        table.add_row("Referenced Tables", ", ".join(draft.tables_used))
+    if draft.unknown_tables:
+        table.add_row("Unknown Tables", f"[red]{', '.join(draft.unknown_tables)}[/red]")
+    if draft.unknown_columns:
+        table.add_row("Unknown Columns", f"[red]{', '.join(draft.unknown_columns)}[/red]")
+
+    table.add_row("Execution Status", f"[dim]{draft.execution_status}[/dim]")
+
+    if draft.repair_attempts > 0:
+        table.add_row("Repair Attempts", str(draft.repair_attempts))
+    if draft.correction_notes:
+        table.add_row("Correction Notes", draft.correction_notes)
+
+    console.print(table)
+    console.print("[dim]------------------------------------------------------------[/dim]\n")
 
 
 def display_execution_preview(
@@ -115,13 +177,14 @@ def _format_cell_value(val: Any, max_len: int = 40) -> str:
 
 def display_query_result(
     result: "QueryResult",
-    view_mode: str = "table",
+    view_mode: str = "auto",
 ) -> None:
-    """Render query execution results with defense-in-depth redaction and wide-result views.
+    """Render query execution results with defense-in-depth redaction and adaptive layout selection.
 
     Args:
         result: Query execution output.
-        view_mode: Presentation mode ('table' for compact table, 'vertical' for record cards, 'wide' for all columns).
+        view_mode: Presentation mode ('auto' chooses layout automatically, 'table' for compact table,
+                   'vertical' for record cards, 'wide' for all columns).
     """
     console.print()
     if not result.is_success:
@@ -146,14 +209,30 @@ def display_query_result(
     mode = view_mode.strip().lower()
     total_cols = len(result.columns)
 
-    # 1. Vertical / Record View
+    # Adaptive layout decision when in 'auto' mode
+    if mode == "auto":
+        term_width = console.width or 80
+        col_widths = [len(str(c)) for c in result.columns]
+        for row in safe_rows[:10]:
+            for i, val in enumerate(row):
+                if i < len(col_widths):
+                    val_str = str(val)[:40] if val is not None else "NULL"
+                    col_widths[i] = max(col_widths[i], len(val_str))
+
+        estimated_table_width = sum(col_widths) + len(col_widths) * 3 + 4
+        if total_cols > 5 or estimated_table_width > (term_width - 5):
+            mode = "vertical"
+        else:
+            mode = "table"
+
+    # 1. Vertical / Record View (best for wide results or >5 columns)
     if mode in ("vertical", "v", "record"):
-        console.print(f"[bold cyan]Query Results[/bold cyan] [dim](Vertical Record View · {result.row_count} rows, {total_cols} columns)[/dim]")
+        console.print(f"[bold cyan]Query Results[/bold cyan] [dim](Record View · {result.row_count} rows, {total_cols} columns)[/dim]")
+        max_col_w = max(len(str(c)) for c in result.columns) if result.columns else 10
         for idx, row in enumerate(safe_rows, start=1):
             console.print(f"[dim]── Record {idx} of {result.row_count} ──────────────────────────────────────[/dim]")
-            max_col_w = max(len(str(c)) for c in result.columns) if result.columns else 10
             for col_name, val in zip(result.columns, row):
-                formatted = _format_cell_value(val, max_len=120)
+                formatted = _format_cell_value(val, max_len=140)
                 console.print(f"  [bold cyan]{col_name:<{max_col_w}}[/bold cyan] : {formatted}")
         console.print()
 
@@ -186,7 +265,7 @@ def display_query_result(
                 f"[dim]Note: Displaying {len(displayed_columns)} of {total_cols} columns. "
                 f"Omitted: {omitted_str}[/dim]"
             )
-            console.print("[dim]Use [bold white]/run vertical[/bold white] (or [bold white]/run wide[/bold white]) to inspect all columns.[/dim]")
+            console.print("[dim]Use [bold white]/view vertical[/bold white] (or [bold white]/view wide[/bold white]) to inspect all columns.[/dim]")
 
     if redacted_cols:
         console.print(f"[dim]Notice: Sensitive credential field(s) were redacted: {', '.join(redacted_cols)}[/dim]")

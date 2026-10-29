@@ -156,7 +156,11 @@ def run_workspace_session(
                     status.update("[cyan]Generating SQL...[/cyan]")
                     draft = generator.generate_draft(cleaned, state)
 
-                display_query_draft(draft)
+                display_query_draft(
+                    draft,
+                    db_name=state.active_database,
+                    dialect_name=state.database_profile.dialect.value if state.database_profile else None,
+                )
                 state.last_query_draft = draft
                 state.add_message(
                     "assistant",
@@ -167,6 +171,19 @@ def run_workspace_session(
                         "execution": draft.execution_status,
                         "dialect": draft.dialect,
                     },
+                )
+
+                sub_input_func = input_func or (
+                    (lambda p: prompt_session.prompt(p)) if prompt_session else (lambda p: console.input(p))
+                )
+                from support.workspace.execution_commands import handle_conversational_execution
+
+                handle_conversational_execution(
+                    draft=draft,
+                    state=state,
+                    db_service=dbs,
+                    llm_service=llms,
+                    user_input_func=sub_input_func,
                 )
     finally:
         checker.shutdown()

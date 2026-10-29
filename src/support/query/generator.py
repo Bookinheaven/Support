@@ -286,6 +286,117 @@ class QueryGenerator:
             unknown_tables = val_res.unknown_tables
             unknown_cols = val_res.unknown_columns
 
+        # 8.5 Bounded, schema-grounded pre-presentation correction (max 2 attempts)
+        correction_notes = None
+        repair_attempts = 0
+        max_repairs = 2
+
+        while (
+            (not is_valid or is_schema_ver is False or bool(unknown_tables) or bool(unknown_cols))
+            and repair_attempts < max_repairs
+            and schema
+            and sql
+        ):
+            from support.query.repair import (
+                find_unambiguous_schema_match,
+                build_repair_prompt,
+            )
+
+            suggestions = []
+            has_ambiguity = False
+
+            # Check unknown tables
+            for unk_tbl in unknown_tables:
+                matched_name, is_unambiguous = find_unambiguous_schema_match(
+                    unk_tbl, list(schema.tables.keys())
+                )
+                if not is_unambiguous:
+                    has_ambiguity = True
+                    break
+                elif matched_name:
+                    suggestions.append(f"Table '{unk_tbl}' does not exist in schema. Use '{matched_name}' instead.")
+
+            # Check unknown columns
+            if not has_ambiguity and unknown_cols:
+                all_cols = []
+                for t_name in tables_used:
+                    tbl_obj = schema.tables.get(t_name)
+                    if tbl_obj:
+                        all_cols.extend([c.name for c in tbl_obj.columns])
+                for unk_col in unknown_cols:
+                    matched_col, is_col_unambiguous = find_unambiguous_schema_match(
+                        unk_col, all_cols
+                    )
+                    if not is_col_unambiguous:
+                        has_ambiguity = True
+                        break
+                    elif matched_col:
+                        suggestions.append(f"Column '{unk_col}' does not exist. Use '{matched_col}' instead.")
+
+            if has_ambiguity:
+                explanation = (
+                    "The request references an ambiguous identifier. "
+                    "Multiple schema objects match; please clarify which table or column was intended."
+                )
+                break
+
+            if not suggestions and "parse" not in validation_status.lower() and "syntax" not in validation_status.lower():
+                break
+
+            repair_attempts += 1
+            repair_prompt = build_repair_prompt(
+                original_question=question,
+                failed_sql=sql,
+                error_description=validation_status,
+                dialect_name=dialect_name,
+                schema_context=schema_context,
+                suggestions=suggestions,
+            )
+
+            try:
+                repair_resp = self.llm_service.generate(
+                    prompt=repair_prompt,
+                    provider=target_provider,
+                    model=target_model,
+                    settings=GenerationSettings(temperature=0.1, timeout=30.0),
+                )
+                rep_sql, rep_expl, _ = _extract_sql_and_explanation(repair_resp.text)
+                if rep_sql:
+                    import sqlglot
+                    from support.query.privacy import try_expand_wildcard_projections
+                    try:
+                        p_sql = sqlglot.parse_one(rep_sql, read=profile.dialect.value)
+                        exp_rep = try_expand_wildcard_projections(p_sql, schema=schema, dialect_str=profile.dialect.value)
+                        if exp_rep is not None:
+                            rep_sql = exp_rep.sql(dialect=profile.dialect.value)
+                    except Exception:
+                        pass
+
+                    rep_val = validate_sql_query(rep_sql, dialect=profile.dialect, schema=schema)
+                    if rep_val.is_valid and rep_val.is_schema_verified is True and not rep_val.unknown_tables:
+                        sql = rep_sql
+                        explanation = rep_expl or explanation
+                        is_valid = True
+                        validation_status = rep_val.status_message
+                        is_parsed = rep_val.is_parsed
+                        schema_status = rep_val.schema_status
+                        is_schema_ver = rep_val.is_schema_verified
+                        tables_used = rep_val.tables_referenced
+                        unknown_tables = rep_val.unknown_tables
+                        unknown_cols = rep_val.unknown_columns
+                        correction_notes = f"Schema-grounded correction applied (attempt {repair_attempts})"
+                        break
+                    else:
+                        sql = rep_sql
+                        is_valid = rep_val.is_valid
+                        validation_status = rep_val.status_message
+                        is_schema_ver = rep_val.is_schema_verified
+                        tables_used = rep_val.tables_referenced
+                        unknown_tables = rep_val.unknown_tables
+                        unknown_cols = rep_val.unknown_columns
+            except Exception:
+                break
+
         # 9. Update state model generation test lifecycle
         gen_status = "Passed" if is_valid else "Failed"
         state.set_model_status(
@@ -312,4 +423,104 @@ class QueryGenerator:
             unknown_columns=unknown_cols,
             schema_coverage=coverage_summary,
             raw_response=raw_text,
+            correction_notes=correction_notes,
+            repair_attempts=repair_attempts,
         )
+
+    def repair_execution_failure(
+        self,
+        failed_draft: QueryDraft,
+        error_message: str,
+        state: "WorkspaceSessionState",
+    ) -> Optional[QueryDraft]:
+        """Attempt bounded (1 attempt) schema-grounded repair for a query that failed execution."""
+        from support.query.repair import (
+            build_repair_prompt,
+            find_unambiguous_schema_match,
+            is_recoverable_execution_error,
+        )
+
+        if not is_recoverable_execution_error(error_message):
+            return None
+
+        if not state.database_profile:
+            return None
+
+        profile = state.database_profile
+        schema = state.cached_schema
+        if not schema:
+            return None
+
+        target_provider = state.active_provider
+        target_model = state.active_model
+        dialect_name = profile.dialect.value
+
+        suggestions = []
+        # Find potential table names mentioned in error text
+        words = re.findall(r"['\"]?([a-zA-Z_][a-zA-Z0-9_]*)['\"]?", error_message)
+        for w in words:
+            matched_tbl, is_unamb = find_unambiguous_schema_match(w, list(schema.tables.keys()))
+            if is_unamb and matched_tbl and matched_tbl != w:
+                suggestions.append(f"Table '{w}' was not found. Use '{matched_tbl}' instead.")
+
+        schema_context, _, coverage_summary, _ = get_relevant_schema_context(
+            schema, question=failed_draft.question, max_tables=12
+        )
+
+        repair_prompt = build_repair_prompt(
+            original_question=failed_draft.question,
+            failed_sql=failed_draft.sql,
+            error_description=f"Execution error: {error_message}",
+            dialect_name=dialect_name,
+            schema_context=schema_context,
+            suggestions=suggestions,
+        )
+
+        try:
+            repair_resp = self.llm_service.generate(
+                prompt=repair_prompt,
+                provider=target_provider,
+                model=target_model,
+                settings=GenerationSettings(temperature=0.1, timeout=30.0),
+            )
+            rep_sql, rep_expl, _ = _extract_sql_and_explanation(repair_resp.text)
+            if not rep_sql:
+                return None
+
+            import sqlglot
+            from support.query.privacy import try_expand_wildcard_projections
+            try:
+                p_sql = sqlglot.parse_one(rep_sql, read=profile.dialect.value)
+                exp_rep = try_expand_wildcard_projections(p_sql, schema=schema, dialect_str=profile.dialect.value)
+                if exp_rep is not None:
+                    rep_sql = exp_rep.sql(dialect=profile.dialect.value)
+            except Exception:
+                pass
+
+            rep_val = validate_sql_query(rep_sql, dialect=profile.dialect, schema=schema)
+            if not rep_val.is_valid:
+                return None
+
+            return QueryDraft(
+                question=failed_draft.question,
+                sql=rep_sql,
+                explanation=rep_expl or f"Corrected SQL to fix execution error: {error_message}",
+                dialect=dialect_name,
+                validation_status=rep_val.status_message,
+                is_validated=rep_val.is_valid,
+                is_parsed=rep_val.is_parsed,
+                schema_status=rep_val.schema_status,
+                is_schema_verified=rep_val.is_schema_verified,
+                provider=target_provider,
+                model=target_model,
+                tables_used=rep_val.tables_referenced,
+                unknown_tables=rep_val.unknown_tables,
+                unknown_columns=rep_val.unknown_columns,
+                schema_coverage=coverage_summary,
+                raw_response=repair_resp.text,
+                correction_notes=f"Post-execution correction: {error_message[:70]}",
+                repair_attempts=1,
+                execution_status="Not performed",
+            )
+        except Exception:
+            return None

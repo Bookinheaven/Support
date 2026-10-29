@@ -181,6 +181,8 @@ def display_workspace_help() -> None:
 
     table.add_row("/status", "Display or refresh active database and model connectivity status")
     table.add_row("/schema", "Inspect or refresh discovered schema for the active database (/schema [refresh])")
+    table.add_row("/details", "Inspect diagnostics, schema coverage, and validation details for current draft")
+    table.add_row("/view", "Re-display latest query results with a specified layout (/view [auto|table|vertical|wide])")
     table.add_row("/run", "Review safeguards and execute the latest approved read-only query draft")
     table.add_row("/db", "Inspect, test, add, or switch active database connection profile")
     table.add_row("/model", "Inspect and switch the active LLM provider and model for this session")
@@ -191,7 +193,7 @@ def display_workspace_help() -> None:
     console.print("[bold cyan]Workspace Slash Commands[/bold cyan]")
     console.print(table)
     console.print("[dim]Enter natural-language questions directly at the prompt to generate draft SQL.[/dim]")
-    console.print("[dim]Queries remain unexecuted drafts until explicitly approved and run via /run.[/dim]")
+    console.print("[dim]Queries generate a formatted draft with instant conversational execution approval [y/N].[/dim]")
     console.print()
 
 

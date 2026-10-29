@@ -97,3 +97,28 @@ def handle_schema(
         console.print(f"  [cyan]•[/cyan] [bold white]{tbl.name}[/bold white] [dim]({len(tbl.columns)} cols{fk_note})[/dim]")
 
     console.print("\n[dim]Use [bold white]/schema refresh[/bold white] to re-inspect remote database schema.[/dim]\n")
+
+
+def handle_details(state: WorkspaceSessionState) -> None:
+    """Handle /details command: display detailed diagnostic report for current query draft."""
+    if not state.last_query_draft:
+        console.print("[yellow]No active query draft to inspect.[/yellow]")
+        console.print("[dim]Ask a natural-language question first to generate a query draft.[/dim]\n")
+        return
+
+    from support.query.display import display_query_details
+
+    display_query_details(state.last_query_draft, db_name=state.active_database)
+
+
+def handle_view(state: WorkspaceSessionState, arg: str = "auto") -> None:
+    """Handle /view command: inspect previous query result without re-executing against database."""
+    if not state.last_query_result:
+        console.print("[yellow]No previous query result to view.[/yellow]")
+        console.print("[dim]Execute an approved query draft first to view results.[/dim]\n")
+        return
+
+    from support.query.display import display_query_result
+
+    display_query_result(state.last_query_result, view_mode=arg or "auto")
+

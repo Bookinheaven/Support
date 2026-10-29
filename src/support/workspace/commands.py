@@ -13,9 +13,11 @@ from support.workspace.db_commands import (
 from support.workspace.execution_commands import handle_run_command
 from support.workspace.general_commands import (
     handle_clear,
+    handle_details,
     handle_help,
     handle_schema,
     handle_status,
+    handle_view,
 )
 from support.workspace.model_commands import handle_model_selection
 from support.workspace.state import WorkspaceSessionState
@@ -25,11 +27,13 @@ __all__ = [
     "guided_add_database_profile",
     "handle_clear",
     "handle_db_selection",
+    "handle_details",
     "handle_help",
     "handle_model_selection",
     "handle_run_command",
     "handle_schema",
     "handle_status",
+    "handle_view",
     "_prompt_password",
 ]
 
@@ -72,6 +76,15 @@ def execute_slash_command(
         handle_schema(state, db_service=dbs, arg=sub_arg)
         return False
 
+    elif base_cmd == "/details":
+        handle_details(state)
+        return False
+
+    elif base_cmd == "/view":
+        sub_arg = cmd_parts[1] if len(cmd_parts) > 1 else "auto"
+        handle_view(state, arg=sub_arg)
+        return False
+
     elif base_cmd == "/clear":
         handle_clear(state)
         return False
@@ -85,7 +98,7 @@ def execute_slash_command(
         return False
 
     elif base_cmd == "/run":
-        sub_arg = cmd_parts[1] if len(cmd_parts) > 1 else "table"
+        sub_arg = cmd_parts[1] if len(cmd_parts) > 1 else "auto"
         handle_run_command(state, db_service=dbs, user_input_func=user_input_func, view_mode=sub_arg)
         return False
 

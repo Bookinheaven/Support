@@ -44,6 +44,7 @@ class WorkspaceSessionState:
         self.model_generation_status: Optional[str] = None
         self.cached_schema: Optional[Any] = None
         self.last_query_draft: Optional[Any] = None
+        self.last_query_result: Optional[Any] = None
 
         self.history: list[ChatMessage] = []
         self.current_task: Optional[str] = None
@@ -89,6 +90,7 @@ class WorkspaceSessionState:
         self.db_details = None
         self.cached_schema = None
         self.last_query_draft = None
+        self.last_query_result = None
         self.notify_status_changed()
 
     def set_database_status(
