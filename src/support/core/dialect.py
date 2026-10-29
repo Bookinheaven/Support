@@ -11,6 +11,7 @@ class Dialect(str, Enum):
     MYSQL = "mysql"
     SQLITE = "sqlite"
     MSSQL = "mssql"
+    MONGODB = "mongodb"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -29,10 +30,22 @@ class Dialect(str, Enum):
             return cls.SQLITE
         if clean in ("mssql", "sqlserver", "tsql", "microsoft_sql_server", "ms_sql"):
             return cls.MSSQL
+        if clean in ("mongodb", "mongo"):
+            return cls.MONGODB
         if clean in ("unknown", "generic"):
             return cls.UNKNOWN
 
         return cls.UNKNOWN
+
+    @property
+    def is_document_database(self) -> bool:
+        """True if dialect is a document database such as MongoDB."""
+        return self == self.MONGODB
+
+    @property
+    def is_relational(self) -> bool:
+        """True if dialect is a relational/SQL database."""
+        return self in (self.POSTGRES, self.MYSQL, self.SQLITE, self.MSSQL)
 
     @property
     def sqlglot_read_dialect(self) -> Optional[str]:
@@ -42,6 +55,7 @@ class Dialect(str, Enum):
             self.MYSQL: "mysql",
             self.SQLITE: "sqlite",
             self.MSSQL: "tsql",
+            self.MONGODB: None,
             self.UNKNOWN: None,
         }
         return mapping.get(self)
@@ -54,6 +68,7 @@ class Dialect(str, Enum):
             self.MYSQL: "MySQL",
             self.SQLITE: "SQLite",
             self.MSSQL: "Microsoft SQL Server",
+            self.MONGODB: "MongoDB",
             self.UNKNOWN: "Unknown / Generic SQL",
         }
         return names.get(self, "Unknown")

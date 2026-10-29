@@ -200,3 +200,105 @@ def display_error(title: str, message: str, details: Optional[str] = None) -> No
     if details:
         content += f"\n[dim]{details}[/dim]"
     console.print(Panel(content, title=f"[bold red]{title}[/bold red]", border_style="red", box=box.ROUNDED))
+
+
+def display_mongo_schema(schema: Any) -> None:
+    """Render MongoDB database inspection result with collections, sampled BSON fields, and indexes."""
+    # Summary header
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", justify="right")
+    grid.add_column(style="white")
+
+    grid.add_row("Database:", schema.database_name)
+    if schema.server_version:
+        grid.add_row("Server Version:", schema.server_version)
+    if schema.accessible_databases:
+        grid.add_row("Discovered Databases:", ", ".join(schema.accessible_databases))
+    grid.add_row("Total Collections:", str(len(schema.collections)))
+    grid.add_row("Sampling Limit:", f"{schema.sample_limit} documents per collection")
+
+    console.print(
+        Panel(
+            grid,
+            title="[bold green]Support — MongoDB Document Schema Discovery[/bold green]",
+            border_style="green",
+            box=box.ROUNDED,
+        )
+    )
+    console.print(
+        "[dim yellow]* Bounded document sampling: Field types and occurrence rates are inferred "
+        "from sampled documents. Document structures are dynamic, not rigid DDL constraints.[/dim yellow]\n"
+    )
+
+    if not schema.collections:
+        console.print(
+            Panel(
+                "[yellow]No collections found in this database.[/yellow]",
+                title="Discovery Result",
+                border_style="yellow",
+            )
+        )
+        return
+
+    for col_name, col in schema.collections.items():
+        count_str = f"~{col.estimated_count:,} docs" if col.estimated_count is not None else "count unknown"
+        sample_str = f"{col.sample_size} sampled"
+        title = f"[bold cyan]Collection: {col.name}[/bold cyan] [dim]({count_str} · {sample_str})[/dim]"
+
+        if col.is_empty:
+            console.print(
+                Panel(
+                    "[dim yellow]Collection is empty. No documents could be sampled.[/dim yellow]",
+                    title=title,
+                    border_style="dim",
+                    box=box.ROUNDED,
+                )
+            )
+            console.print()
+            continue
+
+        field_table = Table(
+            title=title,
+            box=box.ROUNDED,
+            header_style="bold cyan",
+            expand=True,
+        )
+        field_table.add_column("Field Path", style="bold white", ratio=3)
+        field_table.add_column("Observed BSON Type", style="cyan", ratio=3)
+        field_table.add_column("Presence", justify="center", ratio=2)
+        field_table.add_column("Optional / Nullable", justify="center", ratio=2)
+
+        for field in col.fields:
+            type_str = field.type_display
+            if len(field.types) > 1:
+                type_str = f"[bold magenta]{type_str}[/bold magenta]"  # Highlight polymorphic fields
+
+            presence_str = f"{field.count}/{field.sample_size} ({field.occurrence_rate}%)"
+            opt_str = "[yellow]YES[/yellow]" if field.nullable else "[green]NO[/green]"
+
+            field_table.add_row(
+                field.name,
+                type_str,
+                presence_str,
+                opt_str,
+            )
+
+        console.print(field_table)
+
+        if col.indexes:
+            idx_lines = []
+            for idx in col.indexes:
+                keys_desc = ", ".join(f"{k}: {direction}" for k, direction in idx.keys)
+                unique_badge = " [bold magenta][UNIQUE][/bold magenta]" if idx.unique else ""
+                idx_lines.append(f"  * [bold]{idx.name}[/bold]: ({keys_desc}){unique_badge}")
+            console.print(
+                Panel(
+                    "\n".join(idx_lines),
+                    title=f"[dim]Indexes on {col.name}[/dim]",
+                    border_style="dim cyan",
+                    box=box.SQUARE,
+                )
+            )
+
+        console.print()
+

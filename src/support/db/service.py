@@ -30,8 +30,14 @@ class ConnectionVerificationError(SupportError):
 class DatabaseService:
     """Core service for database registration, connection health checks, and profile management."""
 
+    manager: ProfileManager
+
     def __init__(self, manager: Optional[ProfileManager] = None) -> None:
         self.manager = manager or ProfileManager()
+
+    def list_profiles(self) -> list[ConnectionProfile]:
+        """List all saved profiles locally without probing connectivity."""
+        return self.manager.list_profiles()
 
     def register_profile(
         self,

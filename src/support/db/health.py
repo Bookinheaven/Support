@@ -33,6 +33,7 @@ def verify_driver_available(dialect: Dialect) -> tuple[bool, Optional[str]]:
         Dialect.POSTGRES: "psycopg",
         Dialect.MYSQL: "pymysql",
         Dialect.MSSQL: "pymssql",
+        Dialect.MONGODB: "pymongo",
     }
     pkg = driver_packages.get(dialect)
     if not pkg:
@@ -87,6 +88,105 @@ def classify_error(err_str: str, timeout_sec: float) -> tuple[str, str]:
     return "ERROR", "Connection failed. Check connection parameters."
 
 
+def check_mongodb_health(
+    profile: ConnectionProfile,
+    password: Optional[str] = None,
+    timeout: float = 3.0,
+) -> HealthCheckResult:
+    """Execute a lightweight connectivity health check against a MongoDB instance."""
+    try:
+        import pymongo
+        from pymongo.errors import ServerSelectionTimeoutError, OperationFailure, PyMongoError
+    except ImportError:
+        return HealthCheckResult(
+            status="ERROR",
+            error_message="pymongo is not installed.",
+            hint="Install pymongo with: pip install pymongo",
+        )
+
+    timeout_ms = max(int(timeout * 1000), 500)
+    client = None
+    t0 = time.perf_counter()
+    try:
+        is_srv = profile.options.get("srv", False)
+        auth_source = profile.options.get("authSource", profile.database or "admin")
+
+        client_kwargs: dict[str, Any] = {
+            "serverSelectionTimeoutMS": timeout_ms,
+            "connectTimeoutMS": timeout_ms,
+            "socketTimeoutMS": timeout_ms,
+        }
+        if profile.username:
+            client_kwargs["username"] = profile.username
+            client_kwargs["password"] = password or ""
+            client_kwargs["authSource"] = auth_source
+
+        if is_srv:
+            uri = f"mongodb+srv://{profile.host}"
+            client = pymongo.MongoClient(uri, **client_kwargs)
+        else:
+            client = pymongo.MongoClient(
+                host=profile.host or "127.0.0.1",
+                port=profile.port or 27017,
+                **client_kwargs,
+            )
+
+        client.admin.command("ping")
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        version = None
+        try:
+            build_info = client.admin.command("buildinfo")
+            version = build_info.get("version")
+        except Exception:
+            pass
+
+        return HealthCheckResult(
+            status="ONLINE",
+            latency_ms=elapsed_ms,
+            server_version=f"MongoDB {version}" if version else "MongoDB",
+        )
+    except ServerSelectionTimeoutError:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return HealthCheckResult(
+            status="TIMEOUT",
+            latency_ms=elapsed_ms,
+            error_message="MongoDB server did not respond within timeout.",
+            hint="Check host, port, and network connectivity.",
+        )
+    except OperationFailure:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return HealthCheckResult(
+            status="AUTH FAILED",
+            latency_ms=elapsed_ms,
+            error_message="Authentication failed. Check username, password, or authSource.",
+            hint="Verify MongoDB credentials and authentication database (authSource).",
+        )
+    except PyMongoError as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        status, hint = classify_error(str(e), timeout)
+        return HealthCheckResult(
+            status=status,
+            latency_ms=elapsed_ms,
+            error_message=str(e),
+            hint=hint,
+        )
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return HealthCheckResult(
+            status="ERROR",
+            latency_ms=elapsed_ms,
+            error_message=str(e),
+            hint="Unexpected error during MongoDB connection check.",
+        )
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def check_connection_health(
     profile: ConnectionProfile,
     password: Optional[str] = None,
@@ -101,6 +201,10 @@ def check_connection_health(
             error_message=driver_err,
             hint=driver_err,
         )
+
+    # Special case: MongoDB
+    if profile.dialect == Dialect.MONGODB:
+        return check_mongodb_health(profile, password=password, timeout=timeout)
 
     # 2. Guard SQLite: never create missing files
     if profile.dialect == Dialect.SQLITE and profile.database != ":memory:":

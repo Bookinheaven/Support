@@ -19,7 +19,7 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 
 import typer
 
-from support.__version__ import __version__
+from support.core.metadata import APP_CLI_HELP, APP_NAME, APP_VERSION
 from support.core.config import AppConfig
 from support.core.dialect import Dialect
 from support.core.exceptions import (
@@ -45,24 +45,29 @@ from support.cli.display import (
     display_error,
 )
 from support.cli.db_cmds import db_app
+from support.cli.models_cmds import models_app
+from support.cli.auth_cmds import auth_app
 
 app = typer.Typer(
-    name="support",
-    help="Support: Multi-Database Schema Discovery and Inspection CLI.",
+    name=APP_NAME.lower(),
+    help=APP_CLI_HELP,
     add_completion=False,
 )
 app.add_typer(db_app, name="db")
+app.add_typer(models_app, name="models")
+app.add_typer(auth_app, name="auth")
 
 
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
-        console.print(f"[bold cyan]Support[/bold cyan] version [bold white]{__version__}[/bold white]")
+        console.print(f"[bold cyan]{APP_NAME}[/bold cyan] version [bold white]{APP_VERSION}[/bold white]")
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(
         None,
         "--version",
@@ -72,14 +77,17 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """Support CLI root options."""
-    pass
+    """Support CLI root options and interactive workspace entrypoint."""
+    if ctx.invoked_subcommand is None:
+        from support.workspace.session import run_workspace_session
+
+        run_workspace_session()
 
 
 @app.command("version")
 def version_cmd() -> None:
     """Display Support application version."""
-    console.print(f"[bold cyan]Support[/bold cyan] version [bold white]{__version__}[/bold white]")
+    console.print(f"[bold cyan]{APP_NAME}[/bold cyan] version [bold white]{APP_VERSION}[/bold white]")
 
 
 @app.command("inspect-sqlite")

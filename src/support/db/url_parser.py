@@ -25,6 +25,8 @@ def parse_driver_to_dialect(driver_name: str) -> Dialect:
         return Dialect.SQLITE
     if base_driver in ("mssql", "sqlserver", "tsql"):
         return Dialect.MSSQL
+    if base_driver in ("mongodb", "mongo"):
+        return Dialect.MONGODB
 
     # Try general dialect parsing
     d = Dialect.from_string(base_driver)
@@ -111,22 +113,28 @@ def parse_database_url(
         return profile, None
 
     # Client-server engines
-    if not parsed.database:
-        raise SupportError(
-            "Invalid database URL",
-            details="Database name is missing from the connection URL (e.g. postgresql://user:pass@host:port/database).",
-        )
+    if dialect == Dialect.MONGODB:
+        if "+srv" in parsed.drivername.lower():
+            options["srv"] = True
+        database_name = (parsed.database.strip("/") if parsed.database else "") or "admin"
+    else:
+        if not parsed.database:
+            raise SupportError(
+                "Invalid database URL",
+                details="Database name is missing from the connection URL (e.g. postgresql://user:pass@host:port/database).",
+            )
+        database_name = parsed.database.strip("/")
 
-    database_name = parsed.database.strip("/")
     profile_name = name_override or infer_profile_name(dialect, database_name, existing_names)
 
     default_ports = {
         Dialect.POSTGRES: 5432,
         Dialect.MYSQL: 3306,
         Dialect.MSSQL: 1433,
+        Dialect.MONGODB: 27017,
     }
 
-    port = parsed.port or default_ports.get(dialect)
+    port = parsed.port or (None if options.get("srv") else default_ports.get(dialect))
     host = parsed.host or "127.0.0.1"
     username = parsed.username
     password = parsed.password

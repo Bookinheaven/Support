@@ -1,3 +1,5 @@
 """Version information for support package."""
 
-__version__ = "0.1.0"
+from support.core.metadata import APP_VERSION as __version__
+
+__all__ = ["__version__"]

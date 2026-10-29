@@ -18,16 +18,21 @@ dependencies = [
     "sqlglot>=30.0.0",
     "sqlalchemy>=2.0.0",
     "keyring>=25.0.0",
+    "httpx>=0.27.0",
+    "pymongo>=4.6.0",
+    "prompt_toolkit>=3.0.0",
 ]
 
 [project.optional-dependencies]
 postgres = ["psycopg>=3.1.0"]
 mysql = ["pymysql>=1.1.0"]
 mssql = ["pymssql>=2.3.0"]
+mongo = ["pymongo>=4.6.0"]
 all-drivers = [
     "psycopg>=3.1.0",
     "pymysql>=1.1.0",
     "pymssql>=2.3.0",
+    "pymongo>=4.6.0",
 ]
 dev = [
     "pytest>=8.0.0",

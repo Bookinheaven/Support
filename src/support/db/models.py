@@ -32,6 +32,13 @@ class ConnectionProfile(BaseModel):
         if self.dialect == Dialect.SQLITE:
             return f"sqlite:///{self.database}"
 
+        if self.dialect == Dialect.MONGODB:
+            driver = "mongodb+srv" if self.options.get("srv") else "mongodb"
+            user_part = f"{self.username}:***@" if self.username else ""
+            host_str = self.host or "127.0.0.1"
+            port_str = f":{self.port}" if (self.port and not self.options.get("srv")) else ""
+            return f"{driver}://{user_part}{host_str}{port_str}/{self.database}"
+
         driver_map = {
             Dialect.POSTGRES: "postgresql+psycopg",
             Dialect.MYSQL: "mysql+pymysql",

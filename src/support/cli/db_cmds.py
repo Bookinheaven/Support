@@ -102,19 +102,20 @@ def db_add(
         print_step(f"Connecting to database...")
 
     try:
-        profile, health_result = service.register_profile(
-            url=url,
-            name=name,
-            dialect=dialect,
-            host=host,
-            port=port,
-            database=database,
-            username=username,
-            password=password,
-            password_env=password_env,
-            overwrite=overwrite,
-            test_connection=test,
-        )
+        with console.status(f"[cyan]Registering profile '{name or 'database'}'...[/cyan]", spinner="dots"):
+            profile, health_result = service.register_profile(
+                url=url,
+                name=name,
+                dialect=dialect,
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                password_env=password_env,
+                overwrite=overwrite,
+                test_connection=test,
+            )
 
         if health_result and health_result.is_online:
             ver_part = f" · {health_result.server_version}" if health_result.server_version else ""
@@ -151,9 +152,15 @@ def db_list(
 ) -> None:
     """List all saved database profiles with live connectivity status."""
     service = DatabaseService()
-    profiles, health_results = service.list_profiles_with_status(
-        check_health=not no_check, timeout=timeout
-    )
+    if not no_check:
+        with console.status("[cyan]Checking database connections...[/cyan]", spinner="dots"):
+            profiles, health_results = service.list_profiles_with_status(
+                check_health=True, timeout=timeout
+            )
+    else:
+        profiles, health_results = service.list_profiles_with_status(
+            check_health=False, timeout=timeout
+        )
     render_profiles_table(profiles, health_results=health_results, no_check=no_check)
 
 
@@ -169,8 +176,8 @@ def db_test(
         if not profile:
             raise ProfileNotFoundError(profile_name)
 
-        print_step(f"Connecting to '{profile.name}' ({profile.get_redacted_url()})...")
-        _, result = service.test_profile(profile_name, timeout=timeout)
+        with console.status(f"[cyan]Connecting to '{profile.name}' ({profile.get_redacted_url()})...[/cyan]", spinner="dots"):
+            _, result = service.test_profile(profile_name, timeout=timeout)
 
         if result.is_online:
             ver_part = f" · {result.server_version}" if result.server_version else ""
@@ -202,8 +209,24 @@ def db_inspect(
         raise typer.Exit(1)
 
     try:
-        source = LiveDatabaseSchemaSource(profile, password=password)
-        result = source.discover()
+        if profile.dialect == Dialect.MONGODB:
+            from support.schema.sources.mongo_db import MongoDatabaseSchemaSource
+            from support.cli.display import display_mongo_schema
+
+            with console.status(f"[cyan]Inspecting MongoDB collections in '{profile.name}'...[/cyan]", spinner="dots"):
+                mongo_source = MongoDatabaseSchemaSource(profile, password=password)
+                mongo_schema = mongo_source.discover()
+
+            if json_output:
+                print(mongo_schema.model_dump_json(indent=2))
+                return
+
+            display_mongo_schema(mongo_schema)
+            return
+
+        with console.status(f"[cyan]Inspecting database schema for '{profile.name}'...[/cyan]", spinner="dots"):
+            source = LiveDatabaseSchemaSource(profile, password=password)
+            result = source.discover()
 
         if json_output:
             print(result.schema.model_dump_json(indent=2))
