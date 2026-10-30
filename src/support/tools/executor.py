@@ -415,6 +415,40 @@ def execute_database_tool(
             )
 
         if not ddl_sql:
+            cols_desc = call.arguments.get("columns_description", "").strip()
+            if cols_desc:
+                raw_parts = [p.strip() for p in re.split(r"[,;]|(?:\band\b)", cols_desc) if p.strip()]
+                col_defs = []
+                for p in raw_parts:
+                    p_clean = re.sub(r"^(?:with|and)\s+", "", p, flags=re.IGNORECASE).strip()
+                    first_word = p_clean.split()[0] if p_clean else ""
+                    if first_word:
+                        col_name = re.sub(r"[^a-zA-Z0-9_]", "", first_word)
+                        if not col_name:
+                            continue
+                        if col_name.lower() == "id":
+                            if dialect_enum == Dialect.POSTGRES:
+                                col_defs.append(f"    {col_name} SERIAL PRIMARY KEY")
+                            elif dialect_enum == Dialect.SQLITE:
+                                col_defs.append(f"    {col_name} INTEGER PRIMARY KEY AUTOINCREMENT")
+                            elif dialect_enum == Dialect.MYSQL:
+                                col_defs.append(f"    {col_name} INT AUTO_INCREMENT PRIMARY KEY")
+                            elif dialect_enum == Dialect.MSSQL:
+                                col_defs.append(f"    {col_name} INT IDENTITY(1,1) PRIMARY KEY")
+                            else:
+                                col_defs.append(f"    {col_name} INT PRIMARY KEY")
+                        elif any(k in col_name.lower() for k in ("time", "date", "_at")):
+                            col_defs.append(f"    {col_name} TIMESTAMP")
+                        elif col_name.lower().startswith(("is_", "has_")):
+                            col_defs.append(f"    {col_name} BOOLEAN")
+                        elif any(k in col_name.lower() for k in ("count", "amount", "num", "price", "total")):
+                            col_defs.append(f"    {col_name} NUMERIC")
+                        else:
+                            col_defs.append(f"    {col_name} VARCHAR(255)")
+                if col_defs:
+                    ddl_sql = f"CREATE TABLE {tbl_name} (\n" + ",\n".join(col_defs) + "\n);"
+
+        if not ddl_sql:
             q = f"How would you like to define the columns for table '{tbl_name}'?"
             console.print(f"\n[cyan]{q}[/cyan]\n")
             return ToolResult(tool=call.tool, success=True, display_text=q)

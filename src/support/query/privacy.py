@@ -121,14 +121,37 @@ def has_sensitive_wildcard(
     return len(sensitive_tables_found) > 0, sensitive_tables_found
 
 
+def _is_top_level_star(expr: exp.Expression) -> bool:
+    """Return True if an expression represents a top-level * or table.* projection."""
+    if isinstance(expr, exp.Star):
+        return True
+    if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star):
+        return True
+    return False
+
+
 def try_expand_wildcard_projections(
     stmt: exp.Expression,
     schema: DatabaseSchema,
     dialect_str: str = "postgres",
 ) -> Optional[exp.Expression]:
-    """Deterministically transform SELECT * into explicit non-sensitive columns if schema permits."""
-    # Only transform SELECT queries containing a wildcard projection
-    if not isinstance(stmt, (exp.Select, exp.Union)) or not stmt.find(exp.Star):
+    """Deterministically transform SELECT * or SELECT table.* into explicit non-sensitive columns if schema permits."""
+    # Only transform SELECT queries
+    if not isinstance(stmt, (exp.Select, exp.Union)):
+        return None
+
+    # Never modify queries that contain GROUP BY, HAVING, or aggregates
+    if stmt.find(exp.Group) or stmt.find(exp.Having):
+        return None
+
+    # Check for actual top-level wildcard projections in SELECT expressions
+    select_expressions = stmt.expressions
+    has_top_level_star = any(_is_top_level_star(e) for e in select_expressions)
+    if not has_top_level_star:
+        return None
+
+    # Never expand if query contains aggregate functions anywhere in projections
+    if any(isinstance(e, exp.AggFunc) or e.find(exp.AggFunc) for e in select_expressions):
         return None
 
     # Only transform simple single-table queries or clear projections
