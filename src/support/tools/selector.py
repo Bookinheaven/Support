@@ -66,8 +66,9 @@ def select_tool_for_user_request(
 
             # 4. Recent Conversation History
             history_summary = ""
-            if state and state.messages:
-                recent_msgs = state.messages[-6:]
+            state_history = getattr(state, "history", None) or getattr(state, "messages", None)
+            if state and state_history:
+                recent_msgs = state_history[-6:]
                 h_lines = [f"{m.role.capitalize()}: {m.content[:200]}" for m in recent_msgs]
                 history_summary = "Recent Conversation History:\n" + "\n".join(h_lines)
 
@@ -317,8 +318,13 @@ def _simple_fallback(
     if has_row_intent:
         found_tables = []
         if schema and schema.tables:
-            for t_name in schema.tables:
-                if re.search(r"\b" + re.escape(t_name.lower()) + r"\b", norm):
+            for t_name, tbl_obj in schema.tables.items():
+                short_name = getattr(tbl_obj, "name", t_name.split(".")[-1]).lower()
+                full_name = t_name.lower()
+                if (
+                    re.search(r"\b" + re.escape(full_name) + r"\b", norm)
+                    or re.search(r"\b" + re.escape(short_name) + r"\b", norm)
+                ):
                     if t_name not in found_tables:
                         found_tables.append(t_name)
         if not found_tables:

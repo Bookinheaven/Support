@@ -69,8 +69,23 @@ class PerformanceTracker:
 
     @property
     def llm_calls_count(self) -> int:
-        """Number of LLM requests made."""
+        """Total number of LLM requests made."""
         return len(self.llm_calls)
+
+    @property
+    def tool_selection_calls_count(self) -> int:
+        """Number of LLM calls made specifically for tool selection."""
+        return len([c for c in self.llm_calls if "tool" in c.purpose.lower()])
+
+    @property
+    def sql_generation_calls_count(self) -> int:
+        """Number of LLM calls made specifically for SQL generation."""
+        return len([c for c in self.llm_calls if c.purpose == "sql_generation"])
+
+    @property
+    def repair_calls_count(self) -> int:
+        """Number of LLM calls made specifically for SQL repair."""
+        return len([c for c in self.llm_calls if "repair" in c.purpose.lower()])
 
     @property
     def total_prompt_tokens(self) -> Optional[int]:
@@ -178,6 +193,9 @@ class PerformanceTracker:
             "formatted_total_duration": format_duration(duration_ms=self.total_duration_ms),
             "stages": formatted_stages,
             "llm_calls_count": self.llm_calls_count,
+            "tool_selection_calls_count": self.tool_selection_calls_count,
+            "sql_generation_calls_count": self.sql_generation_calls_count,
+            "repair_calls_count": self.repair_calls_count,
             "repair_attempts_count": self.repair_attempts_count,
             "validation_failures_count": self.validation_failures_count,
             "tokens": {
@@ -195,7 +213,19 @@ class PerformanceTracker:
         lines = []
         lines.append(f"Performance Summary ({self.operation_name}):")
         lines.append(f"  Total Duration:     {format_duration(duration_ms=self.total_duration_ms)}")
-        lines.append(f"  LLM Calls:          {self.llm_calls_count}")
+        
+        call_breakdown = f"{self.llm_calls_count} total"
+        sub_calls = []
+        if self.tool_selection_calls_count:
+            sub_calls.append(f"{self.tool_selection_calls_count} tool")
+        if self.sql_generation_calls_count:
+            sub_calls.append(f"{self.sql_generation_calls_count} sql")
+        if self.repair_calls_count:
+            sub_calls.append(f"{self.repair_calls_count} repair")
+        if sub_calls:
+            call_breakdown += f" ({', '.join(sub_calls)})"
+            
+        lines.append(f"  LLM Calls:          {call_breakdown}")
         lines.append(f"  Repair Attempts:    {self.repair_attempts_count}")
         lines.append(f"  Validation Errors:  {self.validation_failures_count}")
 
@@ -228,6 +258,12 @@ class PerformanceTracker:
         for key, dur in self.stage_durations.items():
             if key not in [k for k, _ in ordered_stages] and key != "total_duration":
                 lines.append(f"    • {key.capitalize():26}: {format_duration(duration_ms=dur):>10} ({dur:.1f} ms)")
+
+        if self.llm_calls:
+            lines.append("  Individual LLM Calls:")
+            for c in self.llm_calls:
+                tok_info = f"{c.total_tokens} tok" if c.total_tokens else "-"
+                lines.append(f"    [{c.call_index}] {c.purpose:20}: {format_duration(duration_ms=c.duration_ms):>9} ({tok_info})")
 
         return "\n".join(lines)
 

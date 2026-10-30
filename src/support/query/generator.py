@@ -141,28 +141,68 @@ class QueryGenerator:
 
         schema = state.cached_schema
         t_pc0 = time.perf_counter()
+        # 1.5 Extract referenced tables from the last two assistant SQL drafts using SQLGlot
+        import sqlglot
+        from sqlglot import exp
+
+        conversational_tables: list[str] = []
+        recent_draft_sqls: list[str] = []
+
+        for msg in reversed(state.history):
+            if msg.role == "assistant":
+                draft_sql = msg.metadata.get("sql") or msg.metadata.get("draft_sql")
+                if draft_sql and draft_sql.strip():
+                    recent_draft_sqls.append(draft_sql.strip())
+                    if len(recent_draft_sqls) >= 2:
+                        break
+
+        glot_dialect = profile.dialect.value if profile.dialect != Dialect.MSSQL else "tsql"
+        for draft_sql in recent_draft_sqls:
+            try:
+                parsed = sqlglot.parse_one(draft_sql, read=glot_dialect)
+                for tbl in parsed.find_all(exp.Table):
+                    if tbl.name:
+                        t_clean = tbl.name.lower()
+                        if t_clean not in conversational_tables:
+                            conversational_tables.append(t_clean)
+            except Exception:
+                found = re.findall(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+([a-zA-Z0-9_\.]+)", draft_sql, re.IGNORECASE)
+                for item in found:
+                    t_clean = item.split(".")[-1].lower()
+                    if t_clean not in conversational_tables:
+                        conversational_tables.append(t_clean)
+
         if not schema or not schema.tables:
             schema_context = f"Database '{profile.name}' is currently empty (contains no tables yet)."
             is_full_cov = True
             coverage_summary = "Empty database schema"
             selected_tables = []
         else:
-            # 2. Extract deterministic relevant schema context with join path preservation
-            effective_query = question
-            if state.last_query_draft and state.last_query_draft.tables_used:
-                effective_query = f"{state.last_query_draft.question} {question} {' '.join(state.last_query_draft.tables_used)}"
-
+            # 2. Extract deterministic relevant schema context with join path & multi-turn preservation
             schema_context, is_full_cov, coverage_summary, selected_tables = get_relevant_schema_context(
-                schema, question=effective_query, max_tables=12
+                schema,
+                question=question,
+                max_tables=12,
+                conversational_tables=conversational_tables,
             )
 
-        # 3. Build bounded conversation history (last 2-3 question/draft pairs)
-        history_context = []
-        for msg in state.history[-6:]:
+        # 3. Build bounded conversation history (last 2 question/draft pairs)
+        history_pairs: list[tuple[str, Optional[str]]] = []
+        curr_user_q: Optional[str] = None
+        for msg in state.history[-8:]:
             if msg.role == "user":
-                history_context.append(f"User Question: {msg.content}")
-            elif msg.role == "assistant" and msg.metadata.get("sql"):
-                history_context.append(f"Previous SQL Draft: {msg.metadata['sql']}")
+                curr_user_q = msg.content
+            elif msg.role == "assistant" and curr_user_q is not None:
+                d_sql = msg.metadata.get("sql") or msg.metadata.get("draft_sql")
+                if d_sql:
+                    history_pairs.append((curr_user_q, d_sql))
+                    curr_user_q = None
+
+        recent_pairs = history_pairs[-2:]
+        history_context = []
+        for q, s in recent_pairs:
+            history_context.append(f"User Question: {q}")
+            history_context.append(f"Previous SQL Draft: {s}")
 
         history_prompt = ""
         if history_context:

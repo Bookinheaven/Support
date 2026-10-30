@@ -153,23 +153,26 @@ def run_workspace_session(
                         ):
                             continue
 
-                    # 2. Check for multi-table row inspection or diagram requests
+                    # 2. Check for deterministic tool operations (diagram, inspection, table listing)
                     from support.tools.selector import select_tool_for_user_request
                     from support.tools.executor import execute_database_tool
 
                     tracker.start_stage("tool_selection")
                     try:
+                        # Avoid redundant LLM call for tool selection; ordinary database requests
+                        # proceed directly to QueryGenerator, while deterministic tools (diagram, inspection,
+                        # schema listing) are detected without model overhead.
                         tool_call = select_tool_for_user_request(
                             message=cleaned,
                             schema=state.cached_schema,
                             profile=state.database_profile,
                             state=state,
-                            llm_service=llms,
+                            llm_service=None,
                         )
                     finally:
                         tracker.end_stage("tool_selection")
 
-                    if tool_call.tool in ("inspect_tables", "generate_diagram"):
+                    if tool_call.tool in ("inspect_tables", "generate_diagram", "list_tables"):
                         execute_database_tool(
                             call=tool_call,
                             state=state,
