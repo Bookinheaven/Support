@@ -13,6 +13,7 @@ from support.core.exceptions import (
 )
 from support.core.formatting import format_duration, format_timeout, get_clean_safeguard_info
 from support.core.logging import setup_logging, logger
+from support.core.performance import PerformanceTracker, get_current_tracker, set_current_tracker
 
 __all__ = [
     "AppConfig",
@@ -29,4 +30,7 @@ __all__ = [
     "format_duration",
     "format_timeout",
     "get_clean_safeguard_info",
+    "PerformanceTracker",
+    "get_current_tracker",
+    "set_current_tracker",
 ]

@@ -122,7 +122,11 @@ def handle_details(state: WorkspaceSessionState) -> None:
 
     from support.query.display import display_query_details
 
-    display_query_details(state.last_query_draft, db_name=state.active_database)
+    display_query_details(
+        state.last_query_draft,
+        db_name=state.active_database,
+        performance=getattr(state, "last_performance_metrics", None),
+    )
 
 
 def handle_diagram(

@@ -48,6 +48,7 @@ class WorkspaceSessionState:
         self.last_query_result: Optional[Any] = None
         self.last_inspection_plan: Optional[Any] = None
         self.pending_mutation: Optional[Any] = None
+        self.last_performance_metrics: Optional[Any] = None
 
         self.history: list[ChatMessage] = []
         self.current_task: Optional[str] = None

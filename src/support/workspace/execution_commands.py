@@ -142,6 +142,9 @@ def handle_run_command(
 
         with console.status(f"[cyan]Executing {reval.operation}...[/cyan]", spinner="dots"):
             try:
+                from support.core.performance import get_current_tracker
+                tracker = get_current_tracker()
+                t_conn0 = time.perf_counter()
                 engine = DatabaseConnectionFactory.create_engine(
                     state.database_profile,
                     password=password,
@@ -149,9 +152,18 @@ def handle_run_command(
                     readonly=False,
                 )
                 with engine.connect() as conn:
+                    if tracker:
+                        tracker.stage_durations["db_connection"] = (
+                            tracker.stage_durations.get("db_connection", 0.0) + (time.perf_counter() - t_conn0) * 1000.0
+                        )
                     with conn.begin():
+                        t_exec0 = time.perf_counter()
                         exec_res = conn.execute(text(draft.sql))
                         affected = exec_res.rowcount if hasattr(exec_res, "rowcount") and exec_res.rowcount != -1 else 0
+                        if tracker:
+                            tracker.stage_durations["db_execution"] = (
+                                tracker.stage_durations.get("db_execution", 0.0) + (time.perf_counter() - t_exec0) * 1000.0
+                            )
                 engine.dispose()
                 duration = (time.perf_counter() - start_t) * 1000.0
                 try:
@@ -309,6 +321,9 @@ def handle_conversational_execution(
 
         with console.status(f"[cyan]Executing {reval.operation}...[/cyan]", spinner="dots"):
             try:
+                from support.core.performance import get_current_tracker
+                tracker = get_current_tracker()
+                t_conn0 = time.perf_counter()
                 engine = DatabaseConnectionFactory.create_engine(
                     state.database_profile,
                     password=password,
@@ -316,9 +331,18 @@ def handle_conversational_execution(
                     readonly=False,
                 )
                 with engine.connect() as conn:
+                    if tracker:
+                        tracker.stage_durations["db_connection"] = (
+                            tracker.stage_durations.get("db_connection", 0.0) + (time.perf_counter() - t_conn0) * 1000.0
+                        )
                     with conn.begin():
+                        t_exec0 = time.perf_counter()
                         exec_res = conn.execute(text(draft.sql))
                         affected = exec_res.rowcount if hasattr(exec_res, "rowcount") and exec_res.rowcount != -1 else 0
+                        if tracker:
+                            tracker.stage_durations["db_execution"] = (
+                                tracker.stage_durations.get("db_execution", 0.0) + (time.perf_counter() - t_exec0) * 1000.0
+                            )
                 engine.dispose()
                 duration = (time.perf_counter() - start_t) * 1000.0
                 try:

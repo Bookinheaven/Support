@@ -92,18 +92,25 @@ class ReadOnlyQueryExecutor:
                     error_message=f"SQLite database file '{profile.database}' does not exist.",
                 )
 
+        from support.core.performance import get_current_tracker
+        tracker = get_current_tracker()
         engine: Optional[Engine] = None
         try:
+            t_conn0 = time.perf_counter()
             engine = self.connection_factory.create_engine(
                 profile,
                 password=password,
                 timeout=max(int(cfg.timeout_seconds), 3),
             )
-
             with engine.connect() as conn:
+                if tracker:
+                    tracker.stage_durations["db_connection"] = (
+                        tracker.stage_durations.get("db_connection", 0.0) + (time.perf_counter() - t_conn0) * 1000.0
+                    )
                 safeguard_info = self._apply_safeguards_and_timeout(conn, dialect, cfg, profile)
 
                 # Execute with driver
+                t_exec0 = time.perf_counter()
                 result_proxy = conn.execute(text(sql))
                 columns = list(result_proxy.keys()) if result_proxy.returns_rows else []
                 rows: list[list[Any]] = []
@@ -123,6 +130,11 @@ class ReadOnlyQueryExecutor:
                         extra = result_proxy.fetchmany(1)
                         if extra:
                             is_truncated = True
+
+                if tracker:
+                    tracker.stage_durations["db_execution"] = (
+                        tracker.stage_durations.get("db_execution", 0.0) + (time.perf_counter() - t_exec0) * 1000.0
+                    )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 

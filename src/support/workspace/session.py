@@ -133,89 +133,108 @@ def run_workspace_session(
                     (lambda p: prompt_session.prompt(p)) if prompt_session else (lambda p: console.input(p))
                 )
 
-                # 1. Resume pending conversational mutation if active
-                if state.pending_mutation:
-                    from support.tools.executor import resume_pending_mutation
+                from support.core.performance import PerformanceTracker, set_current_tracker
+                from support.core.config import AppConfig
 
-                    if resume_pending_mutation(
-                        user_response=cleaned,
-                        state=state,
-                        db_service=dbs,
-                        user_input_func=sub_input_func,
-                    ):
+                tracker = PerformanceTracker("user_query")
+                set_current_tracker(tracker)
+                tracker.start_stage("request_processing")
+
+                try:
+                    # 1. Resume pending conversational mutation if active
+                    if state.pending_mutation:
+                        from support.tools.executor import resume_pending_mutation
+
+                        if resume_pending_mutation(
+                            user_response=cleaned,
+                            state=state,
+                            db_service=dbs,
+                            user_input_func=sub_input_func,
+                        ):
+                            continue
+
+                    # 2. Check for multi-table row inspection or diagram requests
+                    from support.tools.selector import select_tool_for_user_request
+                    from support.tools.executor import execute_database_tool
+
+                    tracker.start_stage("tool_selection")
+                    try:
+                        tool_call = select_tool_for_user_request(
+                            message=cleaned,
+                            schema=state.cached_schema,
+                            profile=state.database_profile,
+                            state=state,
+                            llm_service=llms,
+                        )
+                    finally:
+                        tracker.end_stage("tool_selection")
+
+                    if tool_call.tool in ("inspect_tables", "generate_diagram"):
+                        execute_database_tool(
+                            call=tool_call,
+                            state=state,
+                            db_service=dbs,
+                            llm_service=llms,
+                            user_input_func=sub_input_func,
+                            original_question=cleaned,
+                        )
                         continue
 
-                # 2. Check for multi-table row inspection or diagram requests
-                from support.tools.selector import select_tool_for_user_request
-                from support.tools.executor import execute_database_tool
+                    # 3. For all database requests (SELECT, CREATE, ALTER, INSERT, UPDATE, DELETE),
+                    # directly ask the LLM to generate the SQL operation with a single loading indicator
+                    from support.query.generator import QueryGenerator
+                    from support.query.display import display_query_draft
+                    from support.workspace.execution_commands import handle_conversational_execution
 
-                tool_call = select_tool_for_user_request(
-                    message=cleaned,
-                    schema=state.cached_schema,
-                    profile=state.database_profile,
-                    state=state,
-                    llm_service=llms,
-                )
+                    generator = QueryGenerator(db_service=dbs, llm_service=llms)
+                    draft = generator.generate_draft(cleaned, state)
 
-                if tool_call.tool in ("inspect_tables", "generate_diagram"):
-                    execute_database_tool(
-                        call=tool_call,
-                        state=state,
-                        db_service=dbs,
-                        llm_service=llms,
-                        user_input_func=sub_input_func,
-                        original_question=cleaned,
+                    display_query_draft(
+                        draft,
+                        db_name=state.active_database,
+                        dialect_name=state.database_profile.dialect.value if state.database_profile else None,
                     )
-                    continue
 
-                # 3. For all database requests (SELECT, CREATE, ALTER, INSERT, UPDATE, DELETE),
-                # directly ask the LLM to generate the SQL operation with a single loading indicator
-                from support.query.generator import QueryGenerator
-                from support.query.display import display_query_draft
-                from support.workspace.execution_commands import handle_conversational_execution
+                    state.last_query_draft = draft
+                    state.add_message(
+                        "assistant",
+                        f"Generated query draft: {draft.sql}" if draft.sql else draft.explanation,
+                        metadata={"draft_sql": draft.sql, "validation_status": draft.validation_status},
+                    )
 
-                generator = QueryGenerator(db_service=dbs, llm_service=llms)
-                draft = generator.generate_draft(cleaned, state)
+                    if draft.is_validated and not getattr(draft, "unknown_tables", []):
+                        try:
+                            from support.history.store import QueryHistoryStore
+                            QueryHistoryStore().add_entry(
+                                question=draft.question,
+                                sql=draft.sql,
+                                database=state.active_database or "unknown",
+                                dialect=draft.dialect,
+                                explanation=draft.explanation,
+                                is_validated=draft.is_validated,
+                                validation_status=draft.validation_status,
+                                is_schema_verified=draft.is_schema_verified,
+                                schema_status=draft.schema_status,
+                                execution_status=draft.execution_status or "Drafted (pending approval)",
+                            )
+                        except Exception:
+                            pass
 
-                display_query_draft(
-                    draft,
-                    db_name=state.active_database,
-                    dialect_name=state.database_profile.dialect.value if state.database_profile else None,
-                )
-
-                state.last_query_draft = draft
-                state.add_message(
-                    "assistant",
-                    f"Generated query draft: {draft.sql}" if draft.sql else draft.explanation,
-                    metadata={"draft_sql": draft.sql, "validation_status": draft.validation_status},
-                )
-
-                if draft.is_validated and not getattr(draft, "unknown_tables", []):
-                    try:
-                        from support.history.store import QueryHistoryStore
-                        QueryHistoryStore().add_entry(
-                            question=draft.question,
-                            sql=draft.sql,
-                            database=state.active_database or "unknown",
-                            dialect=draft.dialect,
-                            explanation=draft.explanation,
-                            is_validated=draft.is_validated,
-                            validation_status=draft.validation_status,
-                            is_schema_verified=draft.is_schema_verified,
-                            schema_status=draft.schema_status,
-                            execution_status=draft.execution_status or "Drafted (pending approval)",
+                        handle_conversational_execution(
+                            draft=draft,
+                            state=state,
+                            db_service=dbs,
+                            llm_service=llms,
+                            user_input_func=sub_input_func,
+                            view_mode="table",
                         )
-                    except Exception:
-                        pass
-
-                    handle_conversational_execution(
-                        draft=draft,
-                        state=state,
-                        db_service=dbs,
-                        llm_service=llms,
-                        user_input_func=sub_input_func,
-                        view_mode="table",
-                    )
+                finally:
+                    tracker.end_stage("request_processing")
+                    tracker.finish()
+                    state.last_performance_metrics = tracker
+                    set_current_tracker(None)
+                    if AppConfig.from_env().debug:
+                        console.print(f"\n[dim cyan]{tracker.format_summary_table()}[/dim cyan]\n")
                 continue
     finally:
         checker.shutdown()

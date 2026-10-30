@@ -86,6 +86,7 @@ def display_query_draft(
 def display_query_details(
     draft: QueryDraft,
     db_name: Optional[str] = None,
+    performance: Optional[Any] = None,
 ) -> None:
     """Render full diagnostic information for the current query draft on demand (/details)."""
     console.print()
@@ -134,6 +135,31 @@ def display_query_details(
         table.add_row("Correction Notes", draft.correction_notes)
 
     console.print(table)
+
+    if performance and hasattr(performance, "stage_durations"):
+        console.print()
+        console.print("[bold cyan]Performance Diagnostics[/bold cyan]")
+        console.print("[dim]------------------------------------------------------------[/dim]")
+        perf_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+        perf_table.add_column("Metric / Stage", style="bold white", width=26)
+        perf_table.add_column("Value")
+
+        perf_table.add_row("Total Response Time", format_duration(duration_ms=performance.total_duration_ms))
+        perf_table.add_row("LLM Requests", str(performance.llm_calls_count))
+        if performance.total_tokens is not None:
+            perf_table.add_row(
+                "Tokens (in / out / total)",
+                f"{performance.total_prompt_tokens or '-'} / {performance.total_completion_tokens or '-'} / {performance.total_tokens}",
+            )
+        perf_table.add_row("Validation Failures", str(performance.validation_failures_count))
+        perf_table.add_row("Repair Attempts", str(performance.repair_attempts_count))
+
+        for stg, dur in performance.stage_durations.items():
+            if stg != "total_duration":
+                perf_table.add_row(f"  • {stg}", f"{format_duration(duration_ms=dur)} ({dur:.1f} ms)")
+
+        console.print(perf_table)
+
     console.print("[dim]------------------------------------------------------------[/dim]\n")
 
 
@@ -191,6 +217,10 @@ def display_query_result(
     """
     console.print()
     formatted_duration = format_duration(duration_ms=result.duration_ms)
+    from support.core.performance import get_current_tracker
+    import time
+    tracker = get_current_tracker()
+    t_fmt0 = time.perf_counter()
 
     if not result.is_success:
         console.print("[bold red]Execution Failed[/bold red]")
@@ -287,3 +317,7 @@ def display_query_result(
     console.print(
         f"[dim]Completed in {formatted_duration} · Protection: {clean_protection} · {clean_timeout}[/dim]\n"
     )
+    if tracker:
+        tracker.stage_durations["result_formatting"] = (
+            tracker.stage_durations.get("result_formatting", 0.0) + (time.perf_counter() - t_fmt0) * 1000.0
+        )

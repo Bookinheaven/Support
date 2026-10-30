@@ -118,12 +118,36 @@ def select_tool_for_user_request(
             target_provider = state.active_provider if state else None
             target_model = state.active_model if state else None
 
+            full_tool_prompt = f"{system_prompt}\n\n{user_prompt}"
+            from support.core.performance import get_current_tracker
+            import time
+
+            tracker = get_current_tracker()
+            t0 = time.perf_counter()
             resp = llm_service.generate(
-                prompt=f"{system_prompt}\n\n{user_prompt}",
+                prompt=full_tool_prompt,
                 provider=target_provider,
                 model=target_model,
                 settings=GenerationSettings(temperature=0.0, timeout=12.0),
             )
+            dur_ms = (time.perf_counter() - t0) * 1000.0
+
+            if tracker:
+                usage = getattr(resp, "usage", None)
+                p_tok = getattr(usage, "prompt_tokens", None) if usage else None
+                c_tok = getattr(usage, "completion_tokens", None) if usage else None
+                tot_tok = getattr(usage, "total_tokens", None) if usage else None
+                tracker.record_llm_call(
+                    purpose="tool_selection",
+                    duration_ms=dur_ms,
+                    provider=target_provider or getattr(resp, "provider", ""),
+                    model=target_model or getattr(resp, "model", ""),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=tot_tok,
+                    prompt_chars=len(full_tool_prompt),
+                    finish_reason=getattr(resp, "finish_reason", None),
+                )
 
             raw = resp.text.strip()
             m_json = re.search(r"\{[\s\S]*\}", raw)

@@ -115,9 +115,17 @@ class QueryGenerator:
             )
 
         # 1. Retrieve or reuse cached database schema
+        from support.core.performance import get_current_tracker
+        import time
+        tracker = get_current_tracker()
+
         if state.cached_schema is None:
             try:
-                state.cached_schema = inspect_database_schema(profile, db_service=self.db_service)
+                if tracker:
+                    with tracker.track("schema_retrieval"):
+                        state.cached_schema = inspect_database_schema(profile, db_service=self.db_service)
+                else:
+                    state.cached_schema = inspect_database_schema(profile, db_service=self.db_service)
             except Exception as e:
                 return QueryDraft(
                     question=question,
@@ -132,6 +140,7 @@ class QueryGenerator:
                 )
 
         schema = state.cached_schema
+        t_pc0 = time.perf_counter()
         if not schema or not schema.tables:
             schema_context = f"Database '{profile.name}' is currently empty (contains no tables yet)."
             is_full_cov = True
@@ -202,6 +211,10 @@ class QueryGenerator:
         )
 
         full_prompt = f"{system_instructions}\n{history_prompt}Current User Question: {question}"
+        if tracker:
+            tracker.stage_durations["prompt_construction"] = (
+                tracker.stage_durations.get("prompt_construction", 0.0) + (time.perf_counter() - t_pc0) * 1000.0
+            )
 
         # 5. Invoke LLM Gateway
         target_provider = state.active_provider
@@ -209,6 +222,7 @@ class QueryGenerator:
         curr_db_id = state.db_check_id
 
         try:
+            t_llm0 = time.perf_counter()
             with console.status(f"[cyan]Generating SQL draft ({dialect_name})...[/cyan]", spinner="dots"):
                 resp = self.llm_service.generate(
                     prompt=full_prompt,
@@ -216,7 +230,25 @@ class QueryGenerator:
                     model=target_model,
                     settings=GenerationSettings(temperature=0.1, timeout=30.0),
                 )
+            dur_ms = (time.perf_counter() - t_llm0) * 1000.0
             raw_text = resp.text
+
+            if tracker:
+                usage = getattr(resp, "usage", None)
+                p_tok = getattr(usage, "prompt_tokens", None) if usage else None
+                c_tok = getattr(usage, "completion_tokens", None) if usage else None
+                tot_tok = getattr(usage, "total_tokens", None) if usage else None
+                tracker.record_llm_call(
+                    purpose="sql_generation",
+                    duration_ms=dur_ms,
+                    provider=target_provider or getattr(resp, "provider", ""),
+                    model=target_model or getattr(resp, "model", ""),
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    total_tokens=tot_tok,
+                    prompt_chars=len(full_prompt),
+                    finish_reason=getattr(resp, "finish_reason", None),
+                )
         except Exception as e:
             state.set_model_status(
                 state.provider_status or "Available",
@@ -267,6 +299,7 @@ class QueryGenerator:
             )
 
         # 8. Validate SQL independently via AST and verify schema alignment
+        t_val0 = time.perf_counter()
         if not sql:
             is_valid = False
             validation_status = "Rejected: No SQL query generated"
@@ -293,10 +326,18 @@ class QueryGenerator:
             detected_operation = val_res.operation
             is_readonly = val_res.is_readonly
 
+        if tracker:
+            tracker.stage_durations["sql_validation"] = (
+                tracker.stage_durations.get("sql_validation", 0.0) + (time.perf_counter() - t_val0) * 1000.0
+            )
+
         # 8.5 Bounded, schema-grounded pre-presentation correction (max 2 attempts)
         correction_notes = None
         repair_attempts = 0
         max_repairs = 2
+
+        if (not is_valid or is_schema_ver is False or bool(unknown_tables) or bool(unknown_cols)) and tracker:
+            tracker.record_validation_failure()
 
         while (
             (not is_valid or is_schema_ver is False or bool(unknown_tables) or bool(unknown_cols))
@@ -351,6 +392,8 @@ class QueryGenerator:
                 break
 
             repair_attempts += 1
+            if tracker:
+                tracker.record_repair_attempt()
             repair_prompt = build_repair_prompt(
                 original_question=question,
                 failed_sql=sql,
@@ -362,12 +405,30 @@ class QueryGenerator:
             )
 
             try:
+                t_rep0 = time.perf_counter()
                 repair_resp = self.llm_service.generate(
                     prompt=repair_prompt,
                     provider=target_provider,
                     model=target_model,
                     settings=GenerationSettings(temperature=0.1, timeout=30.0),
                 )
+                rep_dur = (time.perf_counter() - t_rep0) * 1000.0
+                if tracker:
+                    tracker.stage_durations["sql_repair"] = (
+                        tracker.stage_durations.get("sql_repair", 0.0) + rep_dur
+                    )
+                    rep_usage = getattr(repair_resp, "usage", None)
+                    tracker.record_llm_call(
+                        purpose="pre_presentation_repair",
+                        duration_ms=rep_dur,
+                        provider=target_provider or getattr(repair_resp, "provider", ""),
+                        model=target_model or getattr(repair_resp, "model", ""),
+                        prompt_tokens=getattr(rep_usage, "prompt_tokens", None) if rep_usage else None,
+                        completion_tokens=getattr(rep_usage, "completion_tokens", None) if rep_usage else None,
+                        total_tokens=getattr(rep_usage, "total_tokens", None) if rep_usage else None,
+                        prompt_chars=len(repair_prompt),
+                        finish_reason=getattr(repair_resp, "finish_reason", None),
+                    )
                 rep_sql, rep_expl, _ = _extract_sql_and_explanation(repair_resp.text)
                 if rep_sql:
                     import sqlglot
@@ -500,13 +561,38 @@ class QueryGenerator:
             suggestions=suggestions,
         )
 
+        from support.core.performance import get_current_tracker
+        import time
+
+        tracker = get_current_tracker()
+        if tracker:
+            tracker.record_repair_attempt()
+
         try:
+            t_post0 = time.perf_counter()
             repair_resp = self.llm_service.generate(
                 prompt=repair_prompt,
                 provider=target_provider,
                 model=target_model,
                 settings=GenerationSettings(temperature=0.1, timeout=30.0),
             )
+            post_dur = (time.perf_counter() - t_post0) * 1000.0
+            if tracker:
+                tracker.stage_durations["sql_repair"] = (
+                    tracker.stage_durations.get("sql_repair", 0.0) + post_dur
+                )
+                post_usage = getattr(repair_resp, "usage", None)
+                tracker.record_llm_call(
+                    purpose="post_execution_repair",
+                    duration_ms=post_dur,
+                    provider=target_provider or getattr(repair_resp, "provider", ""),
+                    model=target_model or getattr(repair_resp, "model", ""),
+                    prompt_tokens=getattr(post_usage, "prompt_tokens", None) if post_usage else None,
+                    completion_tokens=getattr(post_usage, "completion_tokens", None) if post_usage else None,
+                    total_tokens=getattr(post_usage, "total_tokens", None) if post_usage else None,
+                    prompt_chars=len(repair_prompt),
+                    finish_reason=getattr(repair_resp, "finish_reason", None),
+                )
             rep_sql, rep_expl, _ = _extract_sql_and_explanation(repair_resp.text)
             if not rep_sql:
                 return None
