@@ -114,7 +114,7 @@ def test_database_and_model_checks_proceed_independently(sample_state):
 
         # Wait for slow DB check to complete
         checker.wait_completion(timeout=2.0)
-        assert sample_state.database_status == "Online · 84ms"
+        assert sample_state.database_status == "Online · 84 ms"
 
     checker.shutdown()
 
@@ -126,7 +126,7 @@ def test_status_transitions_database_outcomes(sample_state):
     mock_llm = MagicMock(spec=LLMService)
 
     test_cases = [
-        (HealthCheckResult(status="ONLINE", latency_ms=42.0), "Online · 42ms"),
+        (HealthCheckResult(status="ONLINE", latency_ms=42.0), "Online · 42 ms"),
         (HealthCheckResult(status="AUTH FAILED", hint="Password rejected"), "Authentication failed"),
         (HealthCheckResult(status="TIMEOUT", hint="Connection timed out"), "Timeout"),
         (HealthCheckResult(status="OFFLINE", hint="Host unreachable"), "Offline"),
@@ -320,7 +320,7 @@ def test_live_updates_do_not_corrupt_typed_input():
             time.sleep(0.05)
 
             # Background check finishes and updates state
-            state.set_database_status("Online · 84ms")
+            state.set_database_status("Online · 84 ms")
             state.set_model_status("Available")
             time.sleep(0.05)
 

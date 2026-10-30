@@ -63,6 +63,7 @@ class ValidationResult:
     status_message: str
     is_parsed: bool = True
     is_readonly: bool = True
+    operation: str = "SELECT"
     tables_referenced: list[str] = field(default_factory=list)
     columns_referenced: list[str] = field(default_factory=list)
     unknown_tables: list[str] = field(default_factory=list)
@@ -148,9 +149,7 @@ def check_schema_alignment(
     tables_ref: set[str] = set()
     system_metadata_tables: set[str] = set()
     unknown_tables: list[str] = []
-
-    known_tables = {t.name.lower(): t for t in schema.tables.values()}
-    known_short_names = {t.name.split(".")[-1].lower(): t for t in schema.tables.values()}
+    matched_table_objs: list[TableSchema] = []
 
     for tbl in stmt.find_all(exp.Table):
         if not tbl.name:
@@ -159,11 +158,19 @@ def check_schema_alignment(
         if t_name in cte_names:
             continue
 
-        tables_ref.add(tbl.name)
         if is_system_metadata_table_node(tbl):
+            tables_ref.add(tbl.name)
             system_metadata_tables.add(t_name)
-        elif t_name not in known_tables and t_name not in known_short_names:
-            unknown_tables.append(tbl.name)
+            continue
+
+        schema_qual = tbl.db if tbl.db else None
+        table_obj = schema.get_table(tbl.name, schema_name=schema_qual)
+        if table_obj:
+            tables_ref.add(table_obj.full_name)
+            matched_table_objs.append(table_obj)
+        else:
+            ref_name = f"{tbl.db}.{tbl.name}" if tbl.db else tbl.name
+            unknown_tables.append(ref_name)
 
     unknown_tables = sorted(list(set(unknown_tables)))
 
@@ -175,14 +182,11 @@ def check_schema_alignment(
 
     # Check unknown columns against application tables only
     unknown_cols = []
-    app_tables_ref = [t.lower() for t in tables_ref if t.lower() not in system_metadata_tables]
-    if not unknown_tables and app_tables_ref:
+    if not unknown_tables and matched_table_objs:
         ref_table_columns = set()
-        for t_name in app_tables_ref:
-            table_obj = known_tables.get(t_name) or known_short_names.get(t_name)
-            if table_obj:
-                for c in table_obj.columns:
-                    ref_table_columns.add(c.name.lower())
+        for table_obj in matched_table_objs:
+            for c in table_obj.columns:
+                ref_table_columns.add(c.name.lower())
 
         if ref_table_columns:
             for c_name in sorted(cols_ref):
@@ -216,13 +220,17 @@ def validate_sql_query(
     sql: str,
     dialect: Union[Dialect, str] = Dialect.POSTGRES,
     schema: Optional[DatabaseSchema] = None,
+    allow_mutations: bool = False,
+    expected_operation: Optional[str] = None,
 ) -> ValidationResult:
-    """Validate that the generated SQL query is a single, valid, read-only statement.
+    """Validate that the generated SQL query is a valid statement matching safety and dialect rules.
 
     Args:
         sql: The SQL query string to validate.
         dialect: The target database dialect.
         schema: Optional discovered DatabaseSchema to verify table and column references.
+        allow_mutations: If False, enforces read-only SELECT/UNION statements. If True, permits mutations and DDL.
+        expected_operation: Optional operation type to enforce (e.g. 'CREATE TABLE', 'INSERT', 'SELECT').
 
     Returns:
         A ValidationResult detailing parsing, read-only AST validity, and schema alignment.
@@ -285,87 +293,141 @@ def validate_sql_query(
 
     stmt = valid_stmts[0]
 
-    # Statement must be read-only query (Select or Union)
-    if not isinstance(stmt, (exp.Select, exp.Union)):
-        op_name = type(stmt).__name__
-        return ValidationResult(
-            is_valid=False,
-            is_parsed=True,
-            is_readonly=False,
-            status_message=f"Rejected: Only read-only SELECT queries are permitted (found {op_name})",
-        )
+    # Detect statement operation type
+    detected_op = "UNKNOWN"
+    if isinstance(stmt, (exp.Select, exp.Union)):
+        detected_op = "SELECT"
+    elif isinstance(stmt, exp.Insert):
+        detected_op = "INSERT"
+    elif isinstance(stmt, exp.Update):
+        detected_op = "UPDATE"
+    elif isinstance(stmt, exp.Delete):
+        detected_op = "DELETE"
+    elif isinstance(stmt, exp.Create):
+        if stmt.find(exp.Index) or "INDEX" in str(stmt).upper():
+            detected_op = "CREATE INDEX"
+        else:
+            detected_op = "CREATE TABLE"
+    elif isinstance(stmt, exp.Alter):
+        detected_op = "ALTER TABLE"
+    elif isinstance(stmt, exp.Drop):
+        detected_op = "DROP TABLE"
+    else:
+        detected_op = type(stmt).__name__.upper()
 
-    # Check for SELECT ... INTO clause creating tables
-    if stmt.find(exp.Into):
-        return ValidationResult(
-            is_valid=False,
-            is_parsed=True,
-            is_readonly=False,
-            status_message="Rejected: Table creation/modification clause ('SELECT INTO') is not permitted in read-only queries",
-        )
+    if expected_operation and expected_operation.upper() != "UNKNOWN":
+        if detected_op != expected_operation.upper():
+            return ValidationResult(
+                is_valid=False,
+                is_parsed=True,
+                is_readonly=(detected_op == "SELECT"),
+                operation=detected_op,
+                status_message=f"Rejected: Statement operation mismatch (expected {expected_operation.upper()}, found {detected_op})",
+            )
 
-    # Check for row/table locking clauses (FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE)
-    if stmt.find(exp.Lock):
-        return ValidationResult(
-            is_valid=False,
-            is_parsed=True,
-            is_readonly=False,
-            status_message="Rejected: Row/table locking clauses ('FOR UPDATE' / 'FOR SHARE' / 'LOCK IN') are not permitted in read-only queries",
-        )
+    is_readonly_stmt = detected_op == "SELECT"
 
-    # Check for T-SQL locking hints (UPDLOCK, XLOCK, HOLDLOCK, TABLOCKX, etc.)
-    for hint in stmt.find_all(exp.WithTableHint):
-        for hint_expr in hint.expressions:
-            h_name = getattr(hint_expr, "name", str(hint_expr)).lower()
-            if h_name in LOCKING_TABLE_HINTS:
-                return ValidationResult(
-                    is_valid=False,
-                    is_parsed=True,
-                    is_readonly=False,
-                    status_message=f"Rejected: Concurrency locking hint '{h_name.upper()}' is not permitted in read-only queries",
-                )
-
-    # Recursively check the entire AST for any prohibited modification expressions
-    for prohibited_cls in PROHIBITED_EXPRESSIONS:
-        found_mutations = list(stmt.find_all(prohibited_cls))
-        if found_mutations:
-            op_name = prohibited_cls.__name__
+    # If mutations/DDL are not permitted, enforce read-only SELECT
+    if not allow_mutations and (expected_operation is None or expected_operation.upper() == "SELECT"):
+        if not is_readonly_stmt:
+            op_name = type(stmt).__name__
             return ValidationResult(
                 is_valid=False,
                 is_parsed=True,
                 is_readonly=False,
-                status_message=f"Rejected: Prohibited operation detected in query: {op_name}",
+                operation=detected_op,
+                status_message=f"Rejected: Only read-only SELECT queries are permitted (found {op_name})",
             )
 
-    # Check for direct or aliased sensitive field projections
-    from support.query.privacy import (
-        identify_sensitive_projections,
-        has_sensitive_wildcard,
-    )
+        # Check for SELECT ... INTO clause creating tables
+        if stmt.find(exp.Into):
+            return ValidationResult(
+                is_valid=False,
+                is_parsed=True,
+                is_readonly=False,
+                operation=detected_op,
+                status_message="Rejected: Table creation/modification clause ('SELECT INTO') is not permitted in read-only queries",
+            )
 
-    sensitive_projections = identify_sensitive_projections(stmt, schema=schema)
-    if sensitive_projections:
-        sens_str = ", ".join(sensitive_projections)
-        return ValidationResult(
-            is_valid=False,
-            is_parsed=True,
-            is_readonly=True,
-            status_message=f"Rejected: Query projects sensitive credential/authentication field(s): {sens_str}",
+        # Check for row/table locking clauses (FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE)
+        if stmt.find(exp.Lock):
+            return ValidationResult(
+                is_valid=False,
+                is_parsed=True,
+                is_readonly=False,
+                operation=detected_op,
+                status_message="Rejected: Row/table locking clauses ('FOR UPDATE' / 'FOR SHARE' / 'LOCK IN') are not permitted in read-only queries",
+            )
+
+        # Check for T-SQL locking hints (UPDLOCK, XLOCK, HOLDLOCK, TABLOCKX, etc.)
+        for hint in stmt.find_all(exp.WithTableHint):
+            for hint_expr in hint.expressions:
+                h_name = getattr(hint_expr, "name", str(hint_expr)).lower()
+                if h_name in LOCKING_TABLE_HINTS:
+                    return ValidationResult(
+                        is_valid=False,
+                        is_parsed=True,
+                        is_readonly=False,
+                        operation=detected_op,
+                        status_message=f"Rejected: Concurrency locking hint '{h_name.upper()}' is not permitted in read-only queries",
+                    )
+
+        # Recursively check the entire AST for any prohibited modification expressions
+        for prohibited_cls in PROHIBITED_EXPRESSIONS:
+            found_mutations = list(stmt.find_all(prohibited_cls))
+            if found_mutations:
+                op_name = prohibited_cls.__name__
+                return ValidationResult(
+                    is_valid=False,
+                    is_parsed=True,
+                    is_readonly=False,
+                    operation=detected_op,
+                    status_message=f"Rejected: Prohibited operation detected in query: {op_name}",
+                )
+    else:
+        # If mutations are allowed:
+        if detected_op in ("UPDATE", "DELETE"):
+            if not stmt.find(exp.Where):
+                return ValidationResult(
+                    is_valid=False,
+                    is_parsed=True,
+                    is_readonly=False,
+                    operation=detected_op,
+                    status_message=f"Rejected: Unconditional {detected_op} without WHERE clause is prohibited for safety",
+                )
+
+    # Check for direct or aliased sensitive field projections on any statement projecting columns
+    if stmt.find(exp.Select):
+        from support.query.privacy import (
+            identify_sensitive_projections,
+            has_sensitive_wildcard,
         )
 
-    # Check for unconstrained wildcard projections on tables containing sensitive fields
-    has_star, sens_tables = has_sensitive_wildcard(stmt, schema=schema)
-    if has_star and sens_tables and sens_tables != ["unknown_tables"]:
-        t_str = ", ".join(sens_tables)
-        return ValidationResult(
-            is_valid=False,
-            is_parsed=True,
-            is_readonly=True,
-            status_message=(
-                f"Rejected: Wildcard projection 'SELECT *' is prohibited on tables containing sensitive fields "
-                f"({t_str}). Please specify explicit non-sensitive columns."
-            ),
-        )
+        sensitive_projections = identify_sensitive_projections(stmt, schema=schema)
+        if sensitive_projections:
+            sens_str = ", ".join(sensitive_projections)
+            return ValidationResult(
+                is_valid=False,
+                is_parsed=True,
+                is_readonly=is_readonly_stmt,
+                operation=detected_op,
+                status_message=f"Rejected: Query projects sensitive credential/authentication field(s): {sens_str}",
+            )
+
+        # Check for unconstrained wildcard projections on tables containing sensitive fields
+        has_star, sens_tables = has_sensitive_wildcard(stmt, schema=schema)
+        if has_star and sens_tables and sens_tables != ["unknown_tables"]:
+            t_str = ", ".join(sens_tables)
+            return ValidationResult(
+                is_valid=False,
+                is_parsed=True,
+                is_readonly=is_readonly_stmt,
+                operation=detected_op,
+                status_message=(
+                    f"Rejected: Wildcard projection 'SELECT *' is prohibited on tables containing sensitive fields "
+                    f"({t_str}). Please specify explicit non-sensitive columns."
+                ),
+            )
 
     # Check schema alignment if schema is provided
     (
@@ -377,10 +439,17 @@ def validate_sql_query(
         schema_msg,
     ) = check_schema_alignment(stmt, schema=schema)
 
+    # For CREATE TABLE, the table being created is naturally not yet in the schema
+    if detected_op == "CREATE TABLE":
+        unknown_tables = []
+        is_schema_ver = True
+        schema_msg = "Passed: Valid new table DDL definition"
+
     return ValidationResult(
         is_valid=True,
         is_parsed=True,
-        is_readonly=True,
+        is_readonly=is_readonly_stmt,
+        operation=detected_op,
         status_message="Passed",
         tables_referenced=tables_ref,
         columns_referenced=cols_ref,

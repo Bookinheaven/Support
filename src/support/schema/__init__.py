@@ -17,6 +17,11 @@ from support.schema.merger import SchemaMerger
 from support.schema.sources.sql_file import SQLFileSchemaSource
 from support.schema.sources.sqlite_db import SQLiteSchemaSource
 from support.schema.sources.live_db import LiveDatabaseSchemaSource
+from support.schema.diagram import (
+    generate_mermaid_er,
+    save_diagram_file,
+    get_default_diagram_path,
+)
 
 __all__ = [
     "DatabaseSchema",
@@ -33,4 +38,7 @@ __all__ = [
     "SQLFileSchemaSource",
     "SQLiteSchemaSource",
     "LiveDatabaseSchemaSource",
+    "generate_mermaid_er",
+    "save_diagram_file",
+    "get_default_diagram_path",
 ]

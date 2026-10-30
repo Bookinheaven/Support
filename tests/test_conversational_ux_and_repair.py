@@ -33,7 +33,7 @@ from support.workspace.execution_commands import (
     handle_conversational_execution,
     handle_run_command,
 )
-from support.workspace.general_commands import handle_details, handle_view
+from support.workspace.general_commands import handle_details
 from support.workspace.state import WorkspaceSessionState
 
 
@@ -312,23 +312,14 @@ def test_sensitive_field_redacted_in_all_views():
         assert "secretpasswordhash" not in v_out
 
 
-def test_view_command_redisplays_without_reexecuting(sample_state):
-    """Verify /view vertical displays cached result without re-querying the database."""
-    sample_state.last_query_result = QueryResult(
-        executed_sql="SELECT id, username FROM users;",
-        columns=["id", "username"],
-        rows=[(1, "alice")],
-        row_count=1,
-        duration_ms=4.0,
-        dialect="postgres",
-        database="testdb",
-    )
+def test_view_command_removed_from_dispatcher(sample_state):
+    """Verify /view is no longer a recognized slash command."""
     test_console = Console(file=StringIO(), color_system=None)
-    with patch("support.query.display.console", test_console):
+    with patch("support.workspace.commands.console", test_console):
         execute_slash_command("/view vertical", state=sample_state)
         out = test_console.file.getvalue()
-        assert "Record View" in out
-        assert "alice" in out
+        assert "Unknown command" in out
+        assert "/view vertical" in out
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +497,98 @@ def test_stale_draft_invalidation_on_database_change(sample_state):
     # Running with no active database is rejected
     executed = handle_run_command(state=sample_state, user_input_func=lambda _: "y")
     assert executed is False
+
+
+def test_try_expand_wildcard_projections_ignores_mutations(mock_schema):
+    """Verify try_expand_wildcard_projections does not touch UPDATE statements or queries without Star."""
+    import sqlglot
+    from support.query.privacy import try_expand_wildcard_projections
+
+    # UPDATE statement should never be altered
+    update_ast = sqlglot.parse_one("UPDATE users SET email = 'arjun@example.com' WHERE username = 'arjun'", read="postgres")
+    res = try_expand_wildcard_projections(update_ast, mock_schema, "postgres")
+    assert res is None
+
+    # SELECT with explicit columns should not be altered
+    select_explicit = sqlglot.parse_one("SELECT username, email FROM users", read="postgres")
+    res_sel = try_expand_wildcard_projections(select_explicit, mock_schema, "postgres")
+    assert res_sel is None
+
+    # SELECT * with sensitive columns SHOULD be safely expanded
+    select_star = sqlglot.parse_one("SELECT * FROM users", read="postgres")
+    res_star = try_expand_wildcard_projections(select_star, mock_schema, "postgres")
+    assert res_star is not None
+    assert "password_hash" not in res_star.sql("postgres")
+
+
+def test_conversational_execution_mutation_failure_invokes_llm_repair(sample_state):
+    """Verify that when an UPDATE execution fails, LLM is called to repair it and execute the fix."""
+    from support.llm.models import GenerationResponse
+
+    draft = QueryDraft(
+        question="change Arjun's email to arjun.reddy@example.com",
+        sql="UPDATE users SET id, username, email WHERE username = 'Arjun'",
+        explanation="Update email",
+        dialect="postgres",
+        validation_status="Passed",
+        is_validated=True,
+        is_schema_verified=True,
+        operation="UPDATE",
+        is_readonly=False,
+    )
+    sample_state.last_query_draft = draft
+
+    mock_llm = MagicMock()
+    # LLM returns the repaired UPDATE statement
+    mock_llm.generate.return_value = GenerationResponse(
+        text=(
+            "```sql\n"
+            "UPDATE users SET email = 'arjun.reddy@example.com' WHERE username = 'Arjun';\n"
+            "```\n"
+            "Explanation: Corrected syntax to assign email column properly."
+        ),
+        provider="test-prov",
+        model="test-model",
+    )
+
+    prompts_asked = []
+
+    def mock_input(prompt):
+        prompts_asked.append(prompt)
+        return "y"
+
+    mock_engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+    # First execution fails with psycopg syntax error, repair execution succeeds
+    with patch("support.db.connection.DatabaseConnectionFactory.create_engine") as mock_create_engine:
+        # First call fails on execute, second call succeeds
+        call_count = 0
+
+        def fake_execute(stmt):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("(psycopg.errors.SyntaxError) syntax error at or near \",\"\nLINE 1: UPDATE users SET id, username, email WHERE...")
+            res = MagicMock()
+            res.rowcount = 1
+            return res
+
+        mock_conn.execute.side_effect = fake_execute
+        mock_create_engine.return_value = mock_engine
+
+        result = handle_conversational_execution(
+            draft=draft,
+            state=sample_state,
+            llm_service=mock_llm,
+            user_input_func=mock_input,
+        )
+
+        assert result is False  # Original failed
+        assert mock_llm.generate.called  # LLM was invoked to fix the failure!
+        assert len(prompts_asked) == 2  # 1st approval for flawed query, 2nd approval for repaired query
+        assert "corrected UPDATE" in prompts_asked[1]
+        assert sample_state.last_query_draft.sql.rstrip(";") == "UPDATE users SET email = 'arjun.reddy@example.com' WHERE username = 'Arjun'"
+        assert "Executed (UPDATE: 1 rows" in sample_state.last_query_draft.execution_status
+

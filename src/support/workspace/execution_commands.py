@@ -4,6 +4,7 @@ from typing import Callable, Optional
 
 from support.cli.display import console
 from support.core.dialect import Dialect
+from support.core.formatting import format_duration
 from support.db.service import DatabaseService
 from support.query.display import display_execution_preview, display_query_result
 from support.query.executor import ExecutionConfig, QueryResult, ReadOnlyQueryExecutor
@@ -18,6 +19,7 @@ def handle_run_command(
     executor: Optional[ReadOnlyQueryExecutor] = None,
     config: Optional[ExecutionConfig] = None,
     view_mode: str = "table",
+    llm_service: Optional[object] = None,
 ) -> bool:
     """Execute the most recent eligible query draft with explicit confirmation and safeguards.
 
@@ -91,7 +93,12 @@ def handle_run_command(
         return False
 
     # 7. Pre-execution revalidation
-    reval = validate_sql_query(draft.sql, dialect=state.database_profile.dialect, schema=state.cached_schema)
+    reval = validate_sql_query(
+        draft.sql,
+        dialect=state.database_profile.dialect,
+        schema=state.cached_schema,
+        allow_mutations=not getattr(draft, "is_readonly", True),
+    )
     if not reval.is_valid:
         console.print(f"[bold red]Pre-execution revalidation failed:[/bold red] {reval.status_message}\n")
         return False
@@ -110,7 +117,7 @@ def handle_run_command(
 
     # 9. Explicit user approval defaulting to No
     try:
-        raw_answer = user_input_func("Approve execution? [y/N]: ")
+        raw_answer = user_input_func(f"Approve execution of {reval.operation}? [y/N]: ")
     except (KeyboardInterrupt, EOFError):
         console.print("\n[yellow]Execution cancelled. No queries were executed.[/yellow]\n")
         return False
@@ -119,6 +126,64 @@ def handle_run_command(
     if answer not in ("y", "yes"):
         console.print("[yellow]Execution cancelled. No queries were executed.[/yellow]\n")
         return False
+
+    # 10. Execute: if non-read-only (DDL or Mutation), execute within transaction
+    if not reval.is_readonly:
+        import time
+        from sqlalchemy import text
+        from support.db.connection import DatabaseConnectionFactory
+
+        start_t = time.perf_counter()
+        password: Optional[str] = None
+        try:
+            _, password = dbs.manager.get_profile_with_password(state.active_database)
+        except Exception:
+            pass
+
+        with console.status(f"[cyan]Executing {reval.operation}...[/cyan]", spinner="dots"):
+            try:
+                engine = DatabaseConnectionFactory.create_engine(
+                    state.database_profile,
+                    password=password,
+                    timeout=10,
+                    readonly=False,
+                )
+                with engine.connect() as conn:
+                    with conn.begin():
+                        exec_res = conn.execute(text(draft.sql))
+                        affected = exec_res.rowcount if hasattr(exec_res, "rowcount") and exec_res.rowcount != -1 else 0
+                engine.dispose()
+                duration = (time.perf_counter() - start_t) * 1000.0
+                try:
+                    from support.query.schema_context import inspect_database_schema
+                    state.cached_schema = inspect_database_schema(state.database_profile, db_service=dbs)
+                except Exception:
+                    pass
+                console.print(f"\n[bold green]{reval.operation} executed successfully.[/bold green] ({affected} row(s) affected in {duration:.1f}ms)\n")
+                draft.execution_status = f"Executed ({reval.operation}: {affected} rows in {duration:.1f}ms)"
+                return True
+            except Exception as e:
+                console.print(f"\n[bold red]Execution failed:[/bold red] {e}\n")
+                draft.execution_status = f"Failed ({e})"
+                failed_res = QueryResult(
+                    executed_sql=draft.sql,
+                    error_message=str(e),
+                    duration_ms=(time.perf_counter() - start_t) * 1000.0,
+                )
+                _record_execution_in_history(draft, failed_res, state)
+                _handle_post_execution_recovery(
+                    failed_draft=draft,
+                    result=failed_res,
+                    state=state,
+                    dbs=dbs,
+                    exec_inst=exec_inst,
+                    cfg=cfg,
+                    password=password,
+                    user_input_func=user_input_func,
+                    view_mode=view_mode,
+                    llm_service=llm_service,
+                )
+                return False
 
     # 10. Execute under read-only safeguards
     password: Optional[str] = None
@@ -139,7 +204,7 @@ def handle_run_command(
     display_query_result(result, view_mode=view_mode)
 
     if result.is_success:
-        draft.execution_status = f"Executed ({result.row_count} rows in {result.duration_ms:.1f}ms)"
+        draft.execution_status = f"Executed ({result.row_count} rows in {format_duration(duration_ms=result.duration_ms)})"
     else:
         draft.execution_status = f"Failed ({result.error_message})"
         _handle_post_execution_recovery(
@@ -152,7 +217,10 @@ def handle_run_command(
             password=password,
             user_input_func=user_input_func,
             view_mode=view_mode,
+            llm_service=llm_service,
         )
+
+    _record_execution_in_history(draft, result, state)
 
     state.add_message(
         "assistant",
@@ -194,25 +262,17 @@ def handle_conversational_execution(
     if (
         not draft.sql
         or not draft.is_validated
-        or draft.is_schema_verified is not True
         or draft.unknown_tables
     ):
         return False
 
-    # Prompt user for explicit approval
-    try:
-        raw_answer = user_input_func("Execute this read-only query? [y/N]: ")
-    except (KeyboardInterrupt, EOFError):
-        console.print("\n[dim]Query not executed. Draft retained (use /run to execute later).[/dim]\n")
-        return False
-
-    answer = raw_answer.strip().lower()
-    if answer not in ("y", "yes"):
-        console.print("[dim]Query not executed. Draft retained (use /run to execute later).[/dim]\n")
-        return False
-
     # Pre-execution revalidation
-    reval = validate_sql_query(draft.sql, dialect=state.database_profile.dialect, schema=state.cached_schema)
+    reval = validate_sql_query(
+        draft.sql,
+        dialect=state.database_profile.dialect,
+        schema=state.cached_schema,
+        allow_mutations=not getattr(draft, "is_readonly", True),
+    )
     if not reval.is_valid:
         console.print(f"[bold red]Pre-execution revalidation failed:[/bold red] {reval.status_message}\n")
         return False
@@ -220,6 +280,78 @@ def handle_conversational_execution(
     if reval.is_schema_verified is False or reval.unknown_tables:
         console.print(f"[bold red]Pre-execution schema verification failed:[/bold red] {reval.schema_status}\n")
         return False
+
+    # Prompt user for explicit approval
+    prompt_str = "Execute this read-only query? [y/N]: " if reval.is_readonly else f"Approve execution of {reval.operation}? [y/N]: "
+    try:
+        raw_answer = user_input_func(prompt_str)
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[dim]Execution cancelled. Draft retained (use /run to execute later).[/dim]\n")
+        return False
+
+    answer = raw_answer.strip().lower()
+    if answer not in ("y", "yes"):
+        console.print("[dim]Execution cancelled. Draft retained (use /run to execute later).[/dim]\n")
+        return False
+
+    # If non-read-only (DDL or Mutation), execute inside transaction
+    if not reval.is_readonly:
+        import time
+        from sqlalchemy import text
+        from support.db.connection import DatabaseConnectionFactory
+
+        start_t = time.perf_counter()
+        password: Optional[str] = None
+        try:
+            _, password = dbs.manager.get_profile_with_password(state.active_database)
+        except Exception:
+            pass
+
+        with console.status(f"[cyan]Executing {reval.operation}...[/cyan]", spinner="dots"):
+            try:
+                engine = DatabaseConnectionFactory.create_engine(
+                    state.database_profile,
+                    password=password,
+                    timeout=10,
+                    readonly=False,
+                )
+                with engine.connect() as conn:
+                    with conn.begin():
+                        exec_res = conn.execute(text(draft.sql))
+                        affected = exec_res.rowcount if hasattr(exec_res, "rowcount") and exec_res.rowcount != -1 else 0
+                engine.dispose()
+                duration = (time.perf_counter() - start_t) * 1000.0
+                try:
+                    from support.query.schema_context import inspect_database_schema
+                    state.cached_schema = inspect_database_schema(state.database_profile, db_service=dbs)
+                except Exception:
+                    pass
+                console.print(f"\n[bold green]{reval.operation} executed successfully.[/bold green] ({affected} row(s) affected in {duration:.1f}ms)\n")
+                draft.execution_status = f"Executed ({reval.operation}: {affected} rows in {duration:.1f}ms)"
+                state.add_message("assistant", f"Executed {reval.operation} on {state.active_database}: {draft.sql}")
+                return True
+            except Exception as e:
+                console.print(f"\n[bold red]Execution failed:[/bold red] {e}\n")
+                draft.execution_status = f"Failed ({e})"
+                failed_res = QueryResult(
+                    executed_sql=draft.sql,
+                    error_message=str(e),
+                    duration_ms=(time.perf_counter() - start_t) * 1000.0,
+                )
+                _record_execution_in_history(draft, failed_res, state)
+                _handle_post_execution_recovery(
+                    failed_draft=draft,
+                    result=failed_res,
+                    state=state,
+                    dbs=dbs,
+                    exec_inst=exec_inst,
+                    cfg=cfg,
+                    password=password,
+                    user_input_func=user_input_func,
+                    view_mode=view_mode,
+                    llm_service=llm_service,
+                )
+                return False
 
     password: Optional[str] = None
     try:
@@ -239,7 +371,7 @@ def handle_conversational_execution(
     display_query_result(result, view_mode=view_mode)
 
     if result.is_success:
-        draft.execution_status = f"Executed ({result.row_count} rows in {result.duration_ms:.1f}ms)"
+        draft.execution_status = f"Executed ({result.row_count} rows in {format_duration(duration_ms=result.duration_ms)})"
     else:
         draft.execution_status = f"Failed ({result.error_message})"
         _handle_post_execution_recovery(
@@ -255,6 +387,8 @@ def handle_conversational_execution(
             llm_service=llm_service,
         )
 
+    _record_execution_in_history(draft, result, state)
+
     state.add_message(
         "assistant",
         f"Executed query draft on {state.active_database}.",
@@ -268,6 +402,41 @@ def handle_conversational_execution(
     )
 
     return False
+
+
+def _record_execution_in_history(
+    draft: QueryDraft, result: QueryResult, state: WorkspaceSessionState
+) -> None:
+    """Record or update execution outcome in persistent query history."""
+    try:
+        from support.history.store import QueryHistoryStore
+
+        store = QueryHistoryStore()
+        updated = store.update_last_execution(
+            sql=draft.sql,
+            execution_status=draft.execution_status or "Executed",
+            duration_ms=result.duration_ms,
+            row_count=result.row_count,
+            error=result.error_message,
+        )
+        if not updated:
+            store.add_entry(
+                question=draft.question,
+                sql=draft.sql,
+                database=state.active_database or "unknown",
+                dialect=draft.dialect,
+                explanation=draft.explanation,
+                is_validated=draft.is_validated,
+                validation_status=draft.validation_status,
+                is_schema_verified=draft.is_schema_verified,
+                schema_status=draft.schema_status,
+                execution_status=draft.execution_status,
+                duration_ms=result.duration_ms,
+                row_count=result.row_count,
+                error=result.error_message,
+            )
+    except Exception:
+        pass
 
 
 def _handle_post_execution_recovery(
@@ -292,7 +461,7 @@ def _handle_post_execution_recovery(
         )
         return
 
-    if failed_draft.repair_attempts >= 1:
+    if getattr(failed_draft, "post_exec_repaired", False):
         return
 
     from support.query.generator import QueryGenerator
@@ -305,9 +474,10 @@ def _handle_post_execution_recovery(
         repaired
         and repaired.sql
         and repaired.is_validated
-        and repaired.is_schema_verified is True
+        and repaired.is_schema_verified is not False
         and not repaired.unknown_tables
     ):
+        repaired.post_exec_repaired = True
         console.print("\n[bold yellow]Previous execution failed. Proposed corrected query has NOT been executed.[/bold yellow]")
         from support.query.display import display_query_draft
         display_query_draft(
@@ -317,8 +487,10 @@ def _handle_post_execution_recovery(
         )
         state.last_query_draft = repaired
 
+        op_name = repaired.operation or "query"
+        prompt_str = "Execute this corrected read-only query? [y/N]: " if repaired.is_readonly else f"Execute this corrected {op_name}? [y/N]: "
         try:
-            corr_answer = user_input_func("Execute this corrected read-only query? [y/N]: ")
+            corr_answer = user_input_func(prompt_str)
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Corrected query not executed. Draft retained (use /run to execute later).[/dim]\n")
             return
@@ -327,11 +499,59 @@ def _handle_post_execution_recovery(
             # Fresh pre-execution revalidation
             if state.database_profile:
                 reval = validate_sql_query(
-                    repaired.sql, dialect=state.database_profile.dialect, schema=state.cached_schema
+                    repaired.sql,
+                    dialect=state.database_profile.dialect,
+                    schema=state.cached_schema,
+                    allow_mutations=not getattr(repaired, "is_readonly", True),
+                    expected_operation=repaired.operation,
                 )
                 if not reval.is_valid or reval.is_schema_verified is False or reval.unknown_tables:
                     console.print(f"[bold red]Pre-execution revalidation failed on corrected query:[/bold red] {reval.status_message}\n")
                     return
+
+            if not reval.is_readonly:
+                import time
+                from sqlalchemy import text
+                from support.db.connection import DatabaseConnectionFactory
+
+                start_t = time.perf_counter()
+                with console.status(f"[cyan]Executing {reval.operation}...[/cyan]", spinner="dots"):
+                    try:
+                        engine = DatabaseConnectionFactory.create_engine(
+                            state.database_profile,
+                            password=password,
+                            timeout=10,
+                            readonly=False,
+                        )
+                        with engine.connect() as conn:
+                            with conn.begin():
+                                exec_res = conn.execute(text(repaired.sql))
+                                affected = exec_res.rowcount if hasattr(exec_res, "rowcount") and exec_res.rowcount != -1 else 0
+                        engine.dispose()
+                        duration = (time.perf_counter() - start_t) * 1000.0
+                        try:
+                            from support.query.schema_context import inspect_database_schema
+                            state.cached_schema = inspect_database_schema(state.database_profile, db_service=dbs)
+                        except Exception:
+                            pass
+                        console.print(f"\n[bold green]{reval.operation} executed successfully.[/bold green] ({affected} row(s) affected in {duration:.1f}ms)\n")
+                        repaired.execution_status = f"Executed ({reval.operation}: {affected} rows in {duration:.1f}ms)"
+                        state.add_message("assistant", f"Executed {reval.operation} on {state.active_database}: {repaired.sql}")
+                        _record_execution_in_history(
+                            repaired,
+                            QueryResult(executed_sql=repaired.sql, row_count=affected, duration_ms=duration),
+                            state,
+                        )
+                        return
+                    except Exception as e:
+                        console.print(f"\n[bold red]Execution failed:[/bold red] {e}\n")
+                        repaired.execution_status = f"Failed ({e})"
+                        _record_execution_in_history(
+                            repaired,
+                            QueryResult(executed_sql=repaired.sql, error_message=str(e)),
+                            state,
+                        )
+                        return
 
             with console.status("[cyan]Executing corrected read-only query...[/cyan]", spinner="dots"):
                 corr_res = exec_inst.execute(
@@ -343,9 +563,10 @@ def _handle_post_execution_recovery(
             state.last_query_result = corr_res
             display_query_result(corr_res, view_mode=view_mode)
             if corr_res.is_success:
-                repaired.execution_status = f"Executed ({corr_res.row_count} rows in {corr_res.duration_ms:.1f}ms)"
+                repaired.execution_status = f"Executed ({corr_res.row_count} rows in {format_duration(duration_ms=corr_res.duration_ms)})"
             else:
                 repaired.execution_status = f"Failed ({corr_res.error_message})"
+            _record_execution_in_history(repaired, corr_res, state)
         else:
             console.print("[dim]Corrected query not executed. Draft retained (use /run to execute later).[/dim]\n")
     else:

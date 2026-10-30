@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from support.core.formatting import format_duration
 from support.db.models import ConnectionProfile
 from support.db.service import DatabaseService
 from support.llm.service import LLMService
@@ -45,6 +46,8 @@ class WorkspaceSessionState:
         self.cached_schema: Optional[Any] = None
         self.last_query_draft: Optional[Any] = None
         self.last_query_result: Optional[Any] = None
+        self.last_inspection_plan: Optional[Any] = None
+        self.pending_mutation: Optional[Any] = None
 
         self.history: list[ChatMessage] = []
         self.current_task: Optional[str] = None
@@ -91,6 +94,8 @@ class WorkspaceSessionState:
         self.cached_schema = None
         self.last_query_draft = None
         self.last_query_result = None
+        self.last_inspection_plan = None
+        self.pending_mutation = None
         self.notify_status_changed()
 
     def set_database_status(
@@ -184,7 +189,7 @@ class WorkspaceSessionState:
                     if h_res:
                         status_text = str(getattr(h_res.status, "value", h_res.status))
                         if h_res.latency_ms is not None:
-                            status_text += f" ({h_res.latency_ms:.0f} ms)"
+                            status_text += f" ({format_duration(duration_ms=h_res.latency_ms)})"
                         db_status = status_text
                     else:
                         db_status = "Status unknown"
@@ -216,7 +221,31 @@ class WorkspaceSessionState:
                         pass
 
                 if profiles:
-                    selected_profile = profiles[0]
+                    # Look up persisted default profile or environment variable override
+                    default_name = None
+                    if hasattr(dbs, "get_default_profile"):
+                        try:
+                            default_name = dbs.get_default_profile()
+                        except Exception:
+                            pass
+                    if not default_name and hasattr(dbs, "manager") and hasattr(dbs.manager, "get_default_profile"):
+                        try:
+                            default_name = dbs.manager.get_default_profile()
+                        except Exception:
+                            pass
+                    if not default_name:
+                        default_name = os.getenv("SUPPORT_DATABASE")
+
+                    selected_profile = None
+                    if default_name:
+                        for p in profiles:
+                            if p.name.lower() == default_name.lower():
+                                selected_profile = p
+                                break
+
+                    if not selected_profile:
+                        selected_profile = profiles[0]
+
                     active_db_name = selected_profile.name
                     active_db_profile = selected_profile
                     db_status = "Checking..."
@@ -236,7 +265,7 @@ class WorkspaceSessionState:
                 val_res = llms.validate_provider(active_provider, active_model)
                 status_val = val_res.status.value
                 if val_res.latency_ms is not None:
-                    status_val += f" ({val_res.latency_ms:.0f} ms)"
+                    status_val += f" ({format_duration(duration_ms=val_res.latency_ms)})"
                 provider_status = status_val
             else:
                 provider_status = "Checking..."

@@ -5,6 +5,7 @@ from rich import box
 from rich.table import Table
 
 from support.cli.display import console
+from support.core.formatting import format_duration
 from support.db.service import ConnectionVerificationError, DatabaseService
 from support.workspace.state import WorkspaceSessionState
 
@@ -224,7 +225,7 @@ def guided_add_database_profile(
     if saved and profile:
         if is_verified:
             ver_part = f" · {health_result.server_version}" if health_result and health_result.server_version else ""
-            lat_part = f" · {health_result.latency_ms:.0f} ms" if health_result and health_result.latency_ms is not None else ""
+            lat_part = f" · {format_duration(duration_ms=health_result.latency_ms)}" if health_result and health_result.latency_ms is not None else ""
             console.print(f"[bold green]✓[/bold green] Connection verified{ver_part}{lat_part}.")
         else:
             console.print(f"[bold yellow]![/bold yellow] Saved unverified connection '{profile.name}'.")
@@ -233,11 +234,16 @@ def guided_add_database_profile(
 
         if state is not None:
             stat_text = (
-                f"ONLINE ({health_result.latency_ms:.0f} ms)"
+                f"ONLINE ({format_duration(duration_ms=health_result.latency_ms)})"
                 if is_verified and health_result and health_result.latency_ms is not None
                 else ("ONLINE" if is_verified else "Configured (untested)")
             )
             state.set_database(name=profile.name, profile=profile, status=stat_text)
+            if hasattr(db_service, "set_default_profile"):
+                try:
+                    db_service.set_default_profile(profile.name)
+                except Exception:
+                    pass
             console.print(f"[bold green]✓[/bold green] Set as active session database.")
 
     return True
@@ -248,8 +254,51 @@ def handle_db_selection(
     db_service: DatabaseService,
     user_input_func=input,
     checker: Optional[object] = None,
+    arg: str = "",
 ) -> None:
-    """Handle /db command: display saved database profiles and let user select or add one."""
+    """Handle /db command: display saved database profiles and let user select or add one, or switch directly."""
+    clean_arg = (arg or "").strip()
+    if clean_arg.lower().startswith("use "):
+        clean_arg = clean_arg[4:].strip()
+
+    if clean_arg:
+        # Direct switch mode: /db <name_or_index>
+        profiles = db_service.list_profiles()
+        chosen_profile = None
+        if clean_arg.isdigit():
+            idx = int(clean_arg)
+            if 1 <= idx <= len(profiles):
+                chosen_profile = profiles[idx - 1]
+        else:
+            for p in profiles:
+                if p.name.lower() == clean_arg.lower():
+                    chosen_profile = p
+                    break
+
+        if not chosen_profile:
+            console.print(f"[bold red]Error:[/bold red] Unknown database profile '{clean_arg}'.")
+            return
+
+        state.set_database(
+            name=chosen_profile.name,
+            profile=chosen_profile,
+            status="Checking...",
+        )
+        if hasattr(db_service, "set_default_profile"):
+            try:
+                db_service.set_default_profile(chosen_profile.name)
+            except Exception:
+                pass
+
+        if checker and hasattr(checker, "check_database"):
+            checker.check_database()
+
+        console.print(
+            f"[bold green]✓[/bold green] Active database set to [bold white]{chosen_profile.name}[/bold white] "
+            f"[dim]({chosen_profile.dialect.value})[/dim]."
+        )
+        return
+
     console.print()
     console.print("[bold cyan]Database Profiles[/bold cyan]")
 
@@ -290,7 +339,7 @@ def handle_db_selection(
 
         h = health_results.get(p.name)
         if h and h.is_online:
-            lat = f" ({h.latency_ms:.0f} ms)" if h.latency_ms is not None else ""
+            lat = f" ({format_duration(duration_ms=h.latency_ms)})" if h.latency_ms is not None else ""
             status_cell = f"[bold green]ONLINE[/bold green]{lat}"
         elif h and "TIMEOUT" in str(getattr(h.status, "value", h.status)):
             status_cell = "[bold yellow]TIMEOUT[/bold yellow]"
@@ -351,13 +400,19 @@ def handle_db_selection(
     if h_res:
         status_str = str(getattr(h_res.status, "value", h_res.status))
         if h_res.latency_ms is not None:
-            status_str += f" ({h_res.latency_ms:.0f} ms)"
+            status_str += f" ({format_duration(duration_ms=h_res.latency_ms)})"
 
     state.set_database(
         name=chosen_profile.name,
         profile=chosen_profile,
         status=status_str,
     )
+    if hasattr(db_service, "set_default_profile"):
+        try:
+            db_service.set_default_profile(chosen_profile.name)
+        except Exception:
+            pass
+
     if checker and hasattr(checker, "check_database"):
         checker.check_database()
 

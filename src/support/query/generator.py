@@ -4,6 +4,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Optional
 
+from support.cli.display import console
 from support.core.dialect import Dialect
 from support.db.service import DatabaseService
 from support.llm.models import GenerationSettings
@@ -51,10 +52,8 @@ def _extract_sql_and_explanation(response_text: str) -> tuple[str, str, Optional
         explanation = re.sub(r"^explanation:\s*", "", explanation, flags=re.IGNORECASE).strip()
         return sql, explanation or "Generated SQL query based on provided schema.", None
 
-    # 3. Fallback: Search for SELECT / WITH statement in plain text
-    raw_query_match = re.search(r"\b(SELECT\b[\s\S]*?)(?:;|\n\n[A-Z]|$)", clean_text, re.IGNORECASE)
-    if not raw_query_match:
-        raw_query_match = re.search(r"\b(WITH\b[\s\S]*?)(?:;|\n\n[A-Z]|$)", clean_text, re.IGNORECASE)
+    # 3. Fallback: Search for any SQL statement in plain text
+    raw_query_match = re.search(r"\b((?:SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b[\s\S]*?)(?:;|\n\n[A-Z]|$)", clean_text, re.IGNORECASE)
 
     if raw_query_match:
         sql = raw_query_match.group(1).strip()
@@ -134,22 +133,19 @@ class QueryGenerator:
 
         schema = state.cached_schema
         if not schema or not schema.tables:
-            return QueryDraft(
-                question=question,
-                sql="",
-                explanation="The active database contains no accessible tables or schema elements.",
-                dialect=dialect_name,
-                validation_status="Rejected: Empty database schema",
-                is_validated=False,
-                is_parsed=False,
-                provider=state.active_provider,
-                model=state.active_model,
-            )
+            schema_context = f"Database '{profile.name}' is currently empty (contains no tables yet)."
+            is_full_cov = True
+            coverage_summary = "Empty database schema"
+            selected_tables = []
+        else:
+            # 2. Extract deterministic relevant schema context with join path preservation
+            effective_query = question
+            if state.last_query_draft and state.last_query_draft.tables_used:
+                effective_query = f"{state.last_query_draft.question} {question} {' '.join(state.last_query_draft.tables_used)}"
 
-        # 2. Extract deterministic relevant schema context with join path preservation
-        schema_context, is_full_cov, coverage_summary, selected_tables = get_relevant_schema_context(
-            schema, question=question, max_tables=12
-        )
+            schema_context, is_full_cov, coverage_summary, selected_tables = get_relevant_schema_context(
+                schema, question=effective_query, max_tables=12
+            )
 
         # 3. Build bounded conversation history (last 2-3 question/draft pairs)
         history_context = []
@@ -161,7 +157,11 @@ class QueryGenerator:
 
         history_prompt = ""
         if history_context:
-            history_prompt = "Relevant Conversation History:\n" + "\n".join(history_context) + "\n\n"
+            history_prompt = (
+                "Relevant Conversation History:\n"
+                + "\n".join(history_context)
+                + "\nNote: If the current question is a follow-up to a previous question, adapt or modify the previous query draft.\n\n"
+            )
 
         # 4. Construct prompt with explicit dialect rules
         dialect_hints = {
@@ -173,30 +173,32 @@ class QueryGenerator:
         dialect_hint = dialect_hints.get(profile.dialect, "Use standard ANSI SQL.")
 
         system_instructions = (
-            f"You are an expert SQL query generator for {dialect_name.upper()}.\n"
-            f"Your task is to convert the user's natural language question into a single, correct, read-only SQL query.\n\n"
+            f"You are an expert SQL generator for {dialect_name.upper()}.\n"
+            f"Your task is to convert the user's natural language request into a single, correct SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, ALTER TABLE, CREATE INDEX, etc.).\n\n"
             f"DIALECT RULES:\n"
             f"- Target dialect: {dialect_name.upper()}\n"
             f"- {dialect_hint}\n\n"
-            f"CRITICAL SAFETY & CORRECTNESS CONSTRAINTS:\n"
-            f"1. Generate ONLY read-only queries (SELECT or WITH ... SELECT).\n"
-            f"2. NEVER generate INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, or multi-statement queries.\n"
-            f"3. NEVER use table-creation or file export clauses (e.g. SELECT INTO, INTO OUTFILE).\n"
-            f"4. NEVER use locking clauses or locking hints (e.g. FOR UPDATE, FOR SHARE, UPDLOCK, HOLDLOCK).\n"
-            f"5. Use ONLY the table and column names defined in the schema below. NEVER invent columns or tables.\n"
-            f"6. Prefer explicit column lists instead of SELECT * when practical.\n"
-            f"7. Include a reasonable limit (e.g. LIMIT 10 or TOP (10)) when returning ranked, top, or large result sets.\n"
-            f"8. If the request is ambiguous or the schema lacks required data, explain what is missing.\n"
-            f"9. SENSITIVE DATA PROTECTION: NEVER select sensitive credential, password, secret, or token fields. Always prefer explicit non-sensitive columns over SELECT *.\n\n"
+            f"RULES & CONSTRAINTS:\n"
+            f"1. Generate a single, accurate SQL statement matching the user's intent.\n"
+            f"2. For read requests, generate SELECT queries with explicit projections where practical.\n"
+            f"3. For schema requests, generate clean DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX) compatible with {dialect_name.upper()}.\n"
+            f"4. For record modifications, generate parameterized or safe INSERT, UPDATE, or DELETE statements with explicit WHERE conditions.\n"
+            f"5. SENSITIVE DATA PROTECTION: For SELECT queries, NEVER select sensitive credential, password, secret, or token fields. Prefer explicit non-sensitive columns over SELECT *.\n"
+            f"6. NEVER generate multi-statement SQL.\n"
+            f"7. TYPOS AND UNDERSPECIFIED REQUESTS:\n"
+            f"   - Freely interpret the overall intent of the user's message, tolerating misspellings and conversational phrasing.\n"
+            f"   - NEVER create column names from command words, instruction words, or typos.\n"
+            f"   - If the user asks to create a table without specifying columns, either ask for clarification on the columns, or propose a clean, standard schema appropriate for the entity.\n"
+            f"8. If the request is ambiguous or requires clarification before proceeding, explain what is needed without inventing artificial structures.\n\n"
             f"DATABASE SCHEMA:\n"
             f"{schema_context}\n\n"
             f"OUTPUT FORMAT:\n"
             f"Respond with a SQL code block followed by a brief explanation:\n"
             f"```sql\n"
-            f"SELECT ...\n"
+            f"<SQL statement>\n"
             f"```\n"
             f"Explanation:\n"
-            f"<concise description of how the query answers the user question>\n"
+            f"<concise description of how the SQL answers the user request>\n"
         )
 
         full_prompt = f"{system_instructions}\n{history_prompt}Current User Question: {question}"
@@ -207,12 +209,13 @@ class QueryGenerator:
         curr_db_id = state.db_check_id
 
         try:
-            resp = self.llm_service.generate(
-                prompt=full_prompt,
-                provider=target_provider,
-                model=target_model,
-                settings=GenerationSettings(temperature=0.1, timeout=30.0),
-            )
+            with console.status(f"[cyan]Generating SQL draft ({dialect_name})...[/cyan]", spinner="dots"):
+                resp = self.llm_service.generate(
+                    prompt=full_prompt,
+                    provider=target_provider,
+                    model=target_model,
+                    settings=GenerationSettings(temperature=0.1, timeout=30.0),
+                )
             raw_text = resp.text
         except Exception as e:
             state.set_model_status(
@@ -273,10 +276,12 @@ class QueryGenerator:
             tables_used = []
             unknown_tables = []
             unknown_cols = []
+            detected_operation = "SELECT"
+            is_readonly = True
             if clarification:
                 explanation = clarification
         else:
-            val_res = validate_sql_query(sql, dialect=profile.dialect, schema=schema)
+            val_res = validate_sql_query(sql, dialect=profile.dialect, schema=schema, allow_mutations=True)
             is_valid = val_res.is_valid
             validation_status = val_res.status_message
             is_parsed = val_res.is_parsed
@@ -285,6 +290,8 @@ class QueryGenerator:
             tables_used = val_res.tables_referenced
             unknown_tables = val_res.unknown_tables
             unknown_cols = val_res.unknown_columns
+            detected_operation = val_res.operation
+            is_readonly = val_res.is_readonly
 
         # 8.5 Bounded, schema-grounded pre-presentation correction (max 2 attempts)
         correction_notes = None
@@ -350,6 +357,7 @@ class QueryGenerator:
                 error_description=validation_status,
                 dialect_name=dialect_name,
                 schema_context=schema_context,
+                intended_operation=detected_operation,
                 suggestions=suggestions,
             )
 
@@ -372,7 +380,13 @@ class QueryGenerator:
                     except Exception:
                         pass
 
-                    rep_val = validate_sql_query(rep_sql, dialect=profile.dialect, schema=schema)
+                    rep_val = validate_sql_query(
+                        rep_sql,
+                        dialect=profile.dialect,
+                        schema=schema,
+                        allow_mutations=True,
+                        expected_operation=detected_operation,
+                    )
                     if rep_val.is_valid and rep_val.is_schema_verified is True and not rep_val.unknown_tables:
                         sql = rep_sql
                         explanation = rep_expl or explanation
@@ -384,6 +398,8 @@ class QueryGenerator:
                         tables_used = rep_val.tables_referenced
                         unknown_tables = rep_val.unknown_tables
                         unknown_cols = rep_val.unknown_columns
+                        detected_operation = rep_val.operation
+                        is_readonly = rep_val.is_readonly
                         correction_notes = f"Schema-grounded correction applied (attempt {repair_attempts})"
                         break
                     else:
@@ -394,6 +410,8 @@ class QueryGenerator:
                         tables_used = rep_val.tables_referenced
                         unknown_tables = rep_val.unknown_tables
                         unknown_cols = rep_val.unknown_columns
+                        detected_operation = rep_val.operation
+                        is_readonly = rep_val.is_readonly
             except Exception:
                 break
 
@@ -415,6 +433,8 @@ class QueryGenerator:
             is_parsed=is_parsed,
             schema_status=schema_status,
             is_schema_verified=is_schema_ver,
+            operation=detected_operation,
+            is_readonly=is_readonly,
             provider=target_provider,
             model=target_model,
             clarification=clarification,
@@ -467,12 +487,16 @@ class QueryGenerator:
             schema, question=failed_draft.question, max_tables=12
         )
 
+        from support.query.repair import detect_intended_operation
+        intended_op = getattr(failed_draft, "operation", None) or detect_intended_operation(failed_draft.sql, failed_draft.question)
+
         repair_prompt = build_repair_prompt(
             original_question=failed_draft.question,
             failed_sql=failed_draft.sql,
             error_description=f"Execution error: {error_message}",
             dialect_name=dialect_name,
             schema_context=schema_context,
+            intended_operation=intended_op,
             suggestions=suggestions,
         )
 
@@ -497,7 +521,13 @@ class QueryGenerator:
             except Exception:
                 pass
 
-            rep_val = validate_sql_query(rep_sql, dialect=profile.dialect, schema=schema)
+            rep_val = validate_sql_query(
+                rep_sql,
+                dialect=profile.dialect,
+                schema=schema,
+                allow_mutations=True,
+                expected_operation=intended_op,
+            )
             if not rep_val.is_valid:
                 return None
 
@@ -511,6 +541,8 @@ class QueryGenerator:
                 is_parsed=rep_val.is_parsed,
                 schema_status=rep_val.schema_status,
                 is_schema_verified=rep_val.is_schema_verified,
+                operation=rep_val.operation,
+                is_readonly=rep_val.is_readonly,
                 provider=target_provider,
                 model=target_model,
                 tables_used=rep_val.tables_referenced,

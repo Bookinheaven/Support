@@ -5,6 +5,7 @@ from rich import box
 from rich.table import Table
 
 from support.cli.display import console
+from support.core.formatting import format_duration
 from support.llm.service import LLMService
 from support.workspace.state import WorkspaceSessionState
 
@@ -114,7 +115,7 @@ def handle_model_selection(
         val = llm_service.validate_provider(prov_chosen, model_chosen)
         stat_text = val.status.value
         if val.latency_ms is not None:
-            stat_text += f" ({val.latency_ms:.0f} ms)"
+            stat_text += f" ({format_duration(duration_ms=val.latency_ms)})"
     except Exception as e:
         stat_text = f"Unverified: {e}"
 

@@ -35,6 +35,14 @@ class DatabaseService:
     def __init__(self, manager: Optional[ProfileManager] = None) -> None:
         self.manager = manager or ProfileManager()
 
+    def get_default_profile(self) -> Optional[str]:
+        """Return the active default profile name."""
+        return self.manager.get_default_profile()
+
+    def set_default_profile(self, name: str) -> None:
+        """Set the active default profile name."""
+        self.manager.set_default_profile(name)
+
     def list_profiles(self) -> list[ConnectionProfile]:
         """List all saved profiles locally without probing connectivity."""
         return self.manager.list_profiles()

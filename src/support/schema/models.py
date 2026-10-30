@@ -80,6 +80,11 @@ class TableSchema(BaseModel):
             return f"{self.schema_name}.{self.name}"
         return self.name
 
+    @property
+    def display_name(self) -> str:
+        """Formatted display name for UI presentation."""
+        return self.full_name
+
     def get_column(self, col_name: str) -> Optional[ColumnSchema]:
         """Case-insensitive column lookup."""
         target = col_name.strip().lower()
@@ -134,17 +139,71 @@ class DatabaseSchema(BaseModel):
         """Total count of foreign keys across all tables."""
         return sum(len(t.foreign_keys) for t in self.tables.values())
 
-    def get_table(self, name: str, schema_name: Optional[str] = None) -> Optional[TableSchema]:
+    def get_table(
+        self,
+        name: str,
+        schema_name: Optional[str] = None,
+        allow_stem_match: bool = False,
+    ) -> Optional[TableSchema]:
         """Lookup table by name and optional schema name."""
+        if not schema_name and "." in name:
+            parts = name.split(".", 1)
+            schema_name = parts[0]
+            name = parts[1]
+
         full_name = f"{schema_name}.{name}" if schema_name else name
         if full_name in self.tables:
             return self.tables[full_name]
-        # Fallback to case-insensitive or name-only search
+
+        # Case-insensitive full_name lookup
+        full_lower = full_name.lower()
+        for key, table in self.tables.items():
+            if key.lower() == full_lower or table.full_name.lower() == full_lower:
+                return table
+
+        # Fallback to case-insensitive name search
         target_name = name.lower()
+        candidates: list[TableSchema] = []
         for key, table in self.tables.items():
             if table.name.lower() == target_name:
-                if schema_name is None or (table.schema_name and table.schema_name.lower() == schema_name.lower()):
+                if schema_name is None:
+                    candidates.append(table)
+                elif table.schema_name and table.schema_name.lower() == schema_name.lower():
                     return table
+
+        if len(candidates) == 1:
+            return candidates[0]
+        elif len(candidates) > 1:
+            # If multiple exist across schemas and schema_name was not specified,
+            # prioritize standard default schemas (e.g., 'public' for PG, 'dbo' for MSSQL)
+            for c in candidates:
+                if c.schema_name and c.schema_name.lower() in ("public", "dbo"):
+                    return c
+            return candidates[0]
+
+        if not allow_stem_match:
+            return None
+
+        # Fallback to singular / plural stem matching if unambiguous
+        stem_candidates: list[TableSchema] = []
+        for key, table in self.tables.items():
+            t_low = table.name.lower()
+            if t_low.endswith("s") and t_low[:-1] == target_name:
+                stem_candidates.append(table)
+            elif t_low.endswith("ies") and t_low[:-3] + "y" == target_name:
+                stem_candidates.append(table)
+            elif target_name.endswith("s") and target_name[:-1] == t_low:
+                stem_candidates.append(table)
+            elif target_name.endswith("ies") and target_name[:-3] + "y" == t_low:
+                stem_candidates.append(table)
+
+        if len(stem_candidates) == 1:
+            return stem_candidates[0]
+        elif len(stem_candidates) > 1 and schema_name:
+            filtered = [t for t in stem_candidates if t.schema_name and t.schema_name.lower() == schema_name.lower()]
+            if len(filtered) == 1:
+                return filtered[0]
+
         return None
 
     def add_table(self, table: TableSchema) -> None:

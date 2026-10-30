@@ -18,6 +18,8 @@ class QueryDraft:
     schema_status: str = "Not checked"
     is_schema_verified: Optional[bool] = None
     execution_status: str = "Not performed"
+    operation: str = "SELECT"
+    is_readonly: bool = True
     provider: str = ""
     model: str = ""
     clarification: Optional[str] = None
@@ -28,3 +30,4 @@ class QueryDraft:
     raw_response: Optional[str] = None
     correction_notes: Optional[str] = None
     repair_attempts: int = 0
+    post_exec_repaired: bool = False

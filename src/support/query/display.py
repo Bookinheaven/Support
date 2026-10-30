@@ -9,6 +9,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from support.cli.display import console
+from support.core.formatting import format_duration, format_timeout, get_clean_safeguard_info
 from support.query.models import QueryDraft
 from support.query.privacy import redact_sensitive_result_rows
 
@@ -70,8 +71,9 @@ def display_query_draft(
     # 6. Compact safety summary
     active_db = db_name or (draft.dialect if draft.dialect != "unknown" else "active database")
     dialect_str = f" ({dialect_name})" if dialect_name and dialect_name != active_db else ""
+    timeout_str = format_timeout(timeout_seconds)
     console.print(
-        f"[dim]Database: {active_db}{dialect_str} · Read-only: Enforced · Limits: Max {max_rows} rows, Timeout {timeout_seconds:.1f}s[/dim]"
+        f"[dim]Database: {active_db}{dialect_str} · Read-only: Enforced · Limits: Max {max_rows} rows, Timeout: {timeout_str}[/dim]"
     )
 
     # 7. Schema verification status
@@ -148,7 +150,8 @@ def display_execution_preview(
     console.print(f"  [bold white]Database:[/bold white]   {profile_name} ({dialect_name})")
     console.print(f"  [bold white]Validation:[/bold white] [green]{draft.validation_status}[/green]")
     console.print(f"  [bold white]Schema:[/bold white]     [green]{draft.schema_status}[/green]")
-    console.print(f"  [bold white]Limits:[/bold white]     Max {config.max_rows} rows · Timeout {config.timeout_seconds:.1f}s")
+    timeout_str = format_timeout(config.timeout_seconds)
+    console.print(f"  [bold white]Limits:[/bold white]     Max {config.max_rows} rows · Timeout: {timeout_str}")
     console.print()
     console.print("[bold white]SQL to be executed:[/bold white]")
     syntax = Syntax(draft.sql, lexer="sql", theme="monokai", line_numbers=False, word_wrap=True)
@@ -187,15 +190,17 @@ def display_query_result(
                    'vertical' for record cards, 'wide' for all columns).
     """
     console.print()
+    formatted_duration = format_duration(duration_ms=result.duration_ms)
+
     if not result.is_success:
         console.print("[bold red]Execution Failed[/bold red]")
         console.print(f"[red]{result.error_message}[/red]")
-        console.print(f"[dim]Duration: {result.duration_ms:.1f}ms · Database: {result.database} ({result.dialect})[/dim]\n")
+        console.print(f"[dim]Failed in {formatted_duration} · Database: {result.database} ({result.dialect})[/dim]\n")
         return
 
     if result.row_count == 0:
         console.print("[yellow]Query executed successfully, but returned 0 rows.[/yellow]")
-        console.print(f"[dim]Duration: {result.duration_ms:.1f}ms · Database: {result.database} ({result.dialect})[/dim]\n")
+        console.print(f"[dim]Completed in {formatted_duration} · Database: {result.database} ({result.dialect})[/dim]\n")
         return
 
     # Defense-in-depth: apply result-level sensitive field redaction
@@ -265,7 +270,7 @@ def display_query_result(
                 f"[dim]Note: Displaying {len(displayed_columns)} of {total_cols} columns. "
                 f"Omitted: {omitted_str}[/dim]"
             )
-            console.print("[dim]Use [bold white]/view vertical[/bold white] (or [bold white]/view wide[/bold white]) to inspect all columns.[/dim]")
+            console.print("[dim]Use [bold white]/run vertical[/bold white] (or [bold white]/run wide[/bold white]) to inspect all columns.[/dim]")
 
     if redacted_cols:
         console.print(f"[dim]Notice: Sensitive credential field(s) were redacted: {', '.join(redacted_cols)}[/dim]")
@@ -278,5 +283,7 @@ def display_query_result(
     else:
         console.print(f"[green]{result.row_count} row(s) returned.[/green]")
 
-    safeguard = result.safeguard_applied or "Active"
-    console.print(f"[dim]Duration: {result.duration_ms:.1f}ms · Safeguard: {safeguard}[/dim]\n")
+    clean_protection, clean_timeout = get_clean_safeguard_info(result.safeguard_applied)
+    console.print(
+        f"[dim]Completed in {formatted_duration} · Protection: {clean_protection} · {clean_timeout}[/dim]\n"
+    )

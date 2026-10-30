@@ -118,6 +118,24 @@ def test_workspace_help_command():
     assert "/clear" in res.stdout
 
 
+def test_workspace_clear_command():
+    """Verify /clear clears console and renders title banner without duplicating status lines."""
+    state = WorkspaceSessionState(
+        active_database="test_db",
+        active_provider="ollama",
+        active_model="qwen2.5-coder:7b",
+        database_status="Online · 82 ms",
+        provider_status="Available",
+    )
+    with patch("support.workspace.general_commands.console.clear") as mock_clear, \
+         patch("support.workspace.general_commands.display_workspace_title") as mock_title, \
+         patch("support.workspace.general_commands.display_workspace_header") as mock_header:
+        handle_clear(state)
+        mock_clear.assert_called_once()
+        mock_title.assert_called_once()
+        mock_header.assert_not_called()
+
+
 def test_workspace_unknown_command():
     """Verify unknown slash commands display an error without crashing."""
     res = runner.invoke(app, input="/invalid_xyz\n/exit\n")
@@ -320,4 +338,63 @@ def test_workspace_eof_clean_exit():
 
     # Should catch EOFError and terminate loop cleanly
     run_workspace_session(db_service=mock_db, llm_service=mock_llm, input_func=raise_eof)
+
+
+def test_workspace_initialization_respects_persisted_default_profile():
+    """Verify WorkspaceSessionState.initialize() restores the persisted default profile."""
+    p1 = ConnectionProfile(name="athena", dialect=Dialect.POSTGRES, database="db1")
+    p2 = ConnectionProfile(name="mydb", dialect=Dialect.POSTGRES, database="db2")
+    p3 = ConnectionProfile(name="zeus", dialect=Dialect.POSTGRES, database="db3")
+
+    mock_db = MagicMock(spec=DatabaseService)
+    mock_db.list_profiles.return_value = [p1, p2, p3]
+    mock_db.get_default_profile.return_value = "mydb"
+
+    mock_llm = MagicMock(spec=LLMService)
+    mock_cfg = MagicMock()
+    mock_cfg.default_provider = "ollama"
+    mock_cfg.default_model = "qwen2.5-coder:7b"
+    mock_llm.get_config.return_value = mock_cfg
+
+    state = WorkspaceSessionState.initialize(
+        db_service=mock_db,
+        llm_service=mock_llm,
+        check_connectivity=False,
+    )
+
+    assert state.active_database == "mydb"
+    assert state.database_profile == p2
+
+
+def test_workspace_db_selection_persists_default_profile():
+    """Verify /db persists chosen profile as default."""
+    p1 = ConnectionProfile(name="pg_one", dialect=Dialect.POSTGRES, database="db1")
+    p2 = ConnectionProfile(name="sqlite_two", dialect=Dialect.SQLITE, database="data.db")
+    h1 = HealthCheckResult(status="ONLINE", latency_ms=10.0)
+    h2 = HealthCheckResult(status="ONLINE", latency_ms=2.0)
+
+    mock_db = MagicMock(spec=DatabaseService)
+    mock_db.list_profiles_with_status.return_value = ([p1, p2], {"pg_one": h1, "sqlite_two": h2})
+
+    state = WorkspaceSessionState(active_database="pg_one", database_profile=p1)
+    handle_db_selection(state, mock_db, user_input_func=lambda p: "2")
+
+    assert state.active_database == "sqlite_two"
+    mock_db.set_default_profile.assert_called_once_with("sqlite_two")
+
+
+def test_workspace_db_direct_argument_switch():
+    """Verify /db <name> switches active database directly and persists it."""
+    p1 = ConnectionProfile(name="pg_one", dialect=Dialect.POSTGRES, database="db1")
+    p2 = ConnectionProfile(name="sqlite_two", dialect=Dialect.SQLITE, database="data.db")
+
+    mock_db = MagicMock(spec=DatabaseService)
+    mock_db.list_profiles.return_value = [p1, p2]
+
+    state = WorkspaceSessionState(active_database="pg_one", database_profile=p1)
+    handle_db_selection(state, mock_db, user_input_func=lambda p: "", arg="sqlite_two")
+
+    assert state.active_database == "sqlite_two"
+    assert state.database_profile == p2
+    mock_db.set_default_profile.assert_called_once_with("sqlite_two")
 

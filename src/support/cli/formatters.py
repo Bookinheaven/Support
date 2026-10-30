@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+from support.core.formatting import format_duration
 from support.db.models import ConnectionProfile
 from support.db.health import HealthCheckResult
 
@@ -54,6 +55,7 @@ def render_profiles_table(
     profiles: list[ConnectionProfile],
     health_results: Optional[dict[str, HealthCheckResult]] = None,
     no_check: bool = False,
+    default_profile: Optional[str] = None,
 ) -> None:
     """Render a compact, readable table of saved connection profiles."""
     if not profiles:
@@ -84,7 +86,7 @@ def render_profiles_table(
 
             if status == "ONLINE":
                 status_cell = "[bold green]ONLINE[/bold green]"
-                latency_cell = f"[green]{latency:.0f} ms[/green]" if latency is not None else "-"
+                latency_cell = f"[green]{format_duration(duration_ms=latency)}[/green]" if latency is not None else "-"
             elif status == "AUTH FAILED":
                 status_cell = "[bold red]AUTH FAILED[/bold red]"
                 latency_cell = "-"
@@ -99,8 +101,10 @@ def render_profiles_table(
                 latency_cell = "-"
 
         user_display = p.username if p.username else "-"
+        is_default = bool(default_profile and p.name.lower() == default_profile.lower())
+        prefix = "[bold green]*[/bold green] " if is_default else ""
         table.add_row(
-            p.name,
+            f"{prefix}{p.name}",
             p.dialect.display_name,
             p.display_target,
             user_display,
@@ -109,6 +113,8 @@ def render_profiles_table(
         )
 
     console.print(table)
+    if default_profile and any(p.name.lower() == default_profile.lower() for p in profiles):
+        console.print("[dim]* Active default database. Switch with: support db use <name>[/dim]")
 
 
 def render_models_table(
@@ -189,7 +195,7 @@ def render_current_model_panel(
 
     if status_str == "AVAILABLE":
         stat_color = "green"
-        lat_str = f" · {latency:.0f} ms" if latency is not None else ""
+        lat_str = f" · {format_duration(duration_ms=latency)}" if latency is not None else ""
         stat_line = f"[{stat_color}]{status_str}{lat_str}[/{stat_color}]"
     else:
         stat_color = "red" if "FAILED" in status_str or "UNREACHABLE" in status_str else "yellow"
@@ -203,7 +209,7 @@ def render_current_model_panel(
 
     temp = getattr(config, "temperature", 0.1)
     timeout = getattr(config, "timeout", 30.0)
-    console.print(f"[dim]Settings: temperature={temp} · timeout={timeout}s[/dim]")
+    console.print(f"[dim]Settings: temperature={temp} · timeout={format_duration(duration_seconds=timeout)}[/dim]")
 
 
 def render_auth_status_table(status_data: list[dict[str, str]]) -> None:

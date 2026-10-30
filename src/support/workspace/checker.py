@@ -2,6 +2,7 @@
 
 import threading
 from typing import Optional
+from support.core.formatting import format_duration
 from support.db.health import check_connection_health
 from support.db.service import DatabaseService
 from support.llm.models import ProviderStatus
@@ -84,7 +85,7 @@ class WorkspaceStatusChecker:
                         return
 
                     if health.is_online:
-                        lat_str = f" · {health.latency_ms:.0f}ms" if health.latency_ms is not None else ""
+                        lat_str = f" · {format_duration(duration_ms=health.latency_ms)}" if health.latency_ms is not None else ""
                         status = f"Online{lat_str}"
                         details = None
                     elif health.status == "AUTH FAILED":

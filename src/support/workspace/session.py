@@ -129,61 +129,93 @@ def run_workspace_session(
                     state.add_message("assistant", "MongoDB natural-language query generation is not supported yet.")
                     continue
 
-                import re
-                norm_q = re.sub(r"[^\w\s]", "", cleaned.lower().strip())
-                if norm_q in (
-                    "show all the tables",
-                    "show all tables",
-                    "show tables",
-                    "list all the tables",
-                    "list all tables",
-                    "list tables",
-                    "what tables exist",
-                    "what tables are in the database",
-                    "what are all the tables",
-                    "display tables",
-                    "get tables",
-                ):
-                    from support.workspace.general_commands import handle_schema
-                    handle_schema(state, db_service=dbs)
-                    state.add_message("assistant", f"Displayed discovered schema tables for {state.active_database}.")
+                sub_input_func = input_func or (
+                    (lambda p: prompt_session.prompt(p)) if prompt_session else (lambda p: console.input(p))
+                )
+
+                # 1. Resume pending conversational mutation if active
+                if state.pending_mutation:
+                    from support.tools.executor import resume_pending_mutation
+
+                    if resume_pending_mutation(
+                        user_response=cleaned,
+                        state=state,
+                        db_service=dbs,
+                        user_input_func=sub_input_func,
+                    ):
+                        continue
+
+                # 2. Check for multi-table row inspection or diagram requests
+                from support.tools.selector import select_tool_for_user_request
+                from support.tools.executor import execute_database_tool
+
+                tool_call = select_tool_for_user_request(
+                    message=cleaned,
+                    schema=state.cached_schema,
+                    profile=state.database_profile,
+                    state=state,
+                    llm_service=llms,
+                )
+
+                if tool_call.tool in ("inspect_tables", "generate_diagram"):
+                    execute_database_tool(
+                        call=tool_call,
+                        state=state,
+                        db_service=dbs,
+                        llm_service=llms,
+                        user_input_func=sub_input_func,
+                        original_question=cleaned,
+                    )
                     continue
 
-                generator = QueryGenerator(db_service=dbs, llm_service=llms)
+                # 3. For all database requests (SELECT, CREATE, ALTER, INSERT, UPDATE, DELETE),
+                # directly ask the LLM to generate the SQL operation with a single loading indicator
+                from support.query.generator import QueryGenerator
+                from support.query.display import display_query_draft
+                from support.workspace.execution_commands import handle_conversational_execution
 
-                with console.status("[cyan]Analyzing your question...[/cyan]", spinner="dots") as status:
-                    status.update("[cyan]Inspecting relevant schema...[/cyan]")
-                    status.update("[cyan]Generating SQL...[/cyan]")
-                    draft = generator.generate_draft(cleaned, state)
+                generator = QueryGenerator(db_service=dbs, llm_service=llms)
+                draft = generator.generate_draft(cleaned, state)
 
                 display_query_draft(
                     draft,
                     db_name=state.active_database,
                     dialect_name=state.database_profile.dialect.value if state.database_profile else None,
                 )
+
                 state.last_query_draft = draft
                 state.add_message(
                     "assistant",
-                    draft.explanation or "Generated query draft.",
-                    metadata={
-                        "sql": draft.sql,
-                        "validation": draft.validation_status,
-                        "execution": draft.execution_status,
-                        "dialect": draft.dialect,
-                    },
+                    f"Generated query draft: {draft.sql}" if draft.sql else draft.explanation,
+                    metadata={"draft_sql": draft.sql, "validation_status": draft.validation_status},
                 )
 
-                sub_input_func = input_func or (
-                    (lambda p: prompt_session.prompt(p)) if prompt_session else (lambda p: console.input(p))
-                )
-                from support.workspace.execution_commands import handle_conversational_execution
+                if draft.is_validated and not getattr(draft, "unknown_tables", []):
+                    try:
+                        from support.history.store import QueryHistoryStore
+                        QueryHistoryStore().add_entry(
+                            question=draft.question,
+                            sql=draft.sql,
+                            database=state.active_database or "unknown",
+                            dialect=draft.dialect,
+                            explanation=draft.explanation,
+                            is_validated=draft.is_validated,
+                            validation_status=draft.validation_status,
+                            is_schema_verified=draft.is_schema_verified,
+                            schema_status=draft.schema_status,
+                            execution_status=draft.execution_status or "Drafted (pending approval)",
+                        )
+                    except Exception:
+                        pass
 
-                handle_conversational_execution(
-                    draft=draft,
-                    state=state,
-                    db_service=dbs,
-                    llm_service=llms,
-                    user_input_func=sub_input_func,
-                )
+                    handle_conversational_execution(
+                        draft=draft,
+                        state=state,
+                        db_service=dbs,
+                        llm_service=llms,
+                        user_input_func=sub_input_func,
+                        view_mode="table",
+                    )
+                continue
     finally:
         checker.shutdown()

@@ -553,7 +553,7 @@ def test_display_query_draft_renders_all_distinct_claims():
         assert "Database: athena (postgres)" in output
         assert "Read-only: Enforced" in output
         assert "Max 100 rows" in output
-        assert "Timeout 10.0s" in output
+        assert "Timeout: 10 s" in output
         # Verify routine noise was removed from draft view
         assert "Parsing:    Successful" not in output
         assert "Validation: Passed" not in output

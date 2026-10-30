@@ -57,6 +57,7 @@ class DatabaseConnectionFactory:
         profile: ConnectionProfile,
         password: Optional[str] = None,
         timeout: int = 10,
+        readonly: bool = True,
     ) -> Engine:
         """Create a SQLAlchemy Engine for the given profile and credentials."""
         if profile.dialect == Dialect.SQLITE:
@@ -68,7 +69,8 @@ class DatabaseConnectionFactory:
                     str(profile.database),
                     f"SQLite database file '{profile.database}' does not exist.",
                 )
-            return create_engine(f"sqlite:///file:{db_path.resolve().as_posix()}?mode=ro&uri=true")
+            mode_str = "ro" if readonly else "rw"
+            return create_engine(f"sqlite:///file:{db_path.resolve().as_posix()}?mode={mode_str}&uri=true")
 
         driver_map = {
             Dialect.POSTGRES: "postgresql+psycopg",

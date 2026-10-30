@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 from typer.testing import CliRunner
 from support.cli.main import app
+from support.db.manager import ProfileManager
 
 runner = CliRunner()
 
@@ -206,3 +207,46 @@ def test_cli_db_test_nonexistent_profile(tmp_path: Path, monkeypatch):
     res = runner.invoke(app, ["db", "test", "non_existent_profile"])
     assert res.exit_code != 0
     assert "not found" in res.stdout
+
+
+def test_cli_db_use_and_default_persistence(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SUPPORT_CONFIG_DIR", str(tmp_path / ".support"))
+
+    # Add profile a
+    res1 = runner.invoke(app, [
+        "db", "add", "--url", "sqlite:///test_a.db", "--name", "db_alpha", "--no-test"
+    ])
+    assert res1.exit_code == 0
+
+    # Add profile b
+    res2 = runner.invoke(app, [
+        "db", "add", "--url", "sqlite:///test_b.db", "--name", "db_beta", "--no-test"
+    ])
+    assert res2.exit_code == 0
+
+    # Initially db_alpha was added first, so it is the default
+    mgr = ProfileManager(config_dir=tmp_path / ".support")
+    assert mgr.get_default_profile() == "db_alpha"
+
+    # Now use db_beta
+    use_res = runner.invoke(app, ["db", "use", "db_beta"])
+    assert use_res.exit_code == 0
+    assert "Default database profile set to 'db_beta'" in use_res.stdout
+
+    # Verify default profile on disk
+    assert mgr.get_default_profile() == "db_beta"
+
+    # Verify db list shows the marker
+    list_res = runner.invoke(app, ["db", "list", "--no-check"])
+    assert list_res.exit_code == 0
+    assert "* db_beta" in list_res.stdout
+
+    # Test db use with non-existent profile
+    err_res = runner.invoke(app, ["db", "use", "non_existent"])
+    assert err_res.exit_code != 0
+    assert "not found" in err_res.stdout
+
+    # Remove the default profile and ensure default is cleared
+    del_res = runner.invoke(app, ["db", "remove", "db_beta", "-y"])
+    assert del_res.exit_code == 0
+    assert mgr.get_default_profile() is None

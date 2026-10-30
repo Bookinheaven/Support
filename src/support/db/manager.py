@@ -89,6 +89,43 @@ class ProfileManager:
             return None
         return ConnectionProfile.model_validate(entry)
 
+    @property
+    def default_profile_file(self) -> Path:
+        """Path to persisted default profile file."""
+        return self.config_dir / "default_profile"
+
+    def get_default_profile(self) -> Optional[str]:
+        """Return the active default profile name if set and valid, otherwise None."""
+        env_profile = os.getenv("SUPPORT_DATABASE")
+        if env_profile:
+            p = self.get_profile(env_profile)
+            if p:
+                return p.name
+
+        try:
+            if self.default_profile_file.exists():
+                name = self.default_profile_file.read_text(encoding="utf-8").strip()
+                if name:
+                    p = self.get_profile(name)
+                    if p:
+                        return p.name
+        except Exception:
+            pass
+        return None
+
+    def set_default_profile(self, name: str) -> None:
+        """Set the active default database profile."""
+        profile = self.get_profile(name)
+        if not profile:
+            raise ProfileNotFoundError(name)
+        try:
+            self.default_profile_file.write_text(profile.name, encoding="utf-8")
+        except Exception as e:
+            raise SupportError(
+                f"Failed to persist default profile to '{self.default_profile_file}'",
+                details=str(e),
+            )
+
     def save_profile(
         self,
         profile: ConnectionProfile,
@@ -102,9 +139,18 @@ class ProfileManager:
         if existing and not overwrite:
             raise ProfileAlreadyExistsError(profile.name)
 
+        is_first = len(raw) == 0
+
         # Store non-secret metadata
         raw[profile.name] = profile.model_dump(mode="json")
         self._write_raw_profiles(raw)
+
+        # Automatically make default if it is the only/first profile or no default is set
+        if is_first or not self.default_profile_file.exists():
+            try:
+                self.set_default_profile(profile.name)
+            except Exception:
+                pass
 
         # Store password if provided
         if password is not None:
@@ -120,6 +166,15 @@ class ProfileManager:
         if profile.name in raw:
             del raw[profile.name]
             self._write_raw_profiles(raw)
+
+        # Clear default profile if the deleted profile was default
+        try:
+            if self.default_profile_file.exists():
+                curr = self.default_profile_file.read_text(encoding="utf-8").strip()
+                if curr.lower() == profile.name.lower():
+                    self.default_profile_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         # Remove password from keyring
         KeyringStore.delete_password(profile.name)

@@ -127,6 +127,10 @@ def try_expand_wildcard_projections(
     dialect_str: str = "postgres",
 ) -> Optional[exp.Expression]:
     """Deterministically transform SELECT * into explicit non-sensitive columns if schema permits."""
+    # Only transform SELECT queries containing a wildcard projection
+    if not isinstance(stmt, (exp.Select, exp.Union)) or not stmt.find(exp.Star):
+        return None
+
     # Only transform simple single-table queries or clear projections
     tables = list(stmt.find_all(exp.Table))
     if len(tables) != 1:

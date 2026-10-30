@@ -14,6 +14,7 @@ from support.cli.formatters import (
     render_models_table,
 )
 from support.core.exceptions import LLMError, SupportError
+from support.core.formatting import format_duration
 from support.llm.models import GenerationSettings, LLMProviderType, ProviderStatus
 from support.llm.service import LLMService
 
@@ -195,7 +196,7 @@ def models_test(
             )
 
         lat_str = (
-            f" · {response.latency_ms:.0f} ms"
+            f" · {format_duration(duration_ms=response.latency_ms)}"
             if response.latency_ms is not None
             else ""
         )
