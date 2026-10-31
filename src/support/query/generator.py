@@ -18,29 +18,38 @@ if TYPE_CHECKING:
 
 
 def _extract_sql_and_explanation(response_text: str) -> tuple[str, str, Optional[str]]:
-    """Extract SQL query and explanation from model response text.
+    """Extract SQL query and explanation or clarification from model response text.
 
-    Supports Markdown fenced code blocks, JSON responses, or raw text.
+    Supports Markdown fenced code blocks, JSON responses, explicit Clarification blocks, or raw text.
     """
     clean_text = response_text.strip()
 
     # 1. Check for JSON format
-    if (clean_text.startswith("{") and clean_text.endswith("}")) or ("\"sql\"" in clean_text):
+    if (clean_text.startswith("{") and clean_text.endswith("}")) or ("\"sql\"" in clean_text) or ("\"clarification\"" in clean_text):
         try:
-            # Look for JSON block in markdown or direct text
             json_match = re.search(r"\{.*\}", clean_text, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group(0))
                 sql = parsed.get("sql", "").strip()
                 explanation = parsed.get("explanation", "").strip()
                 clarification = parsed.get("clarification")
+                if clarification and not sql:
+                    return "", explanation or clarification.strip(), clarification.strip()
                 if sql:
                     return sql, explanation, clarification
         except Exception:
             pass
 
-    # 2. Check for fenced code block: ```sql ... ```
+    # 2. Check for explicit Clarification: prefix or block
+    m_clar = re.search(r"(?:^|\n)\s*Clarification:\s*([\s\S]+?)(?:\n\s*```|$)", clean_text, re.IGNORECASE)
     sql_block_match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", clean_text, re.IGNORECASE)
+
+    if m_clar and (not sql_block_match or clean_text.lower().startswith("clarification")):
+        clar = m_clar.group(1).strip()
+        clar = re.sub(r"\n\s*(?:explanation|note):\s*[\s\S]*$", "", clar, flags=re.IGNORECASE).strip()
+        return "", clar, clar
+
+    # 3. Check for fenced code block: ```sql ... ```
     if sql_block_match:
         sql = sql_block_match.group(1).strip()
         # The explanation is whatever comes after or before the block
@@ -52,17 +61,17 @@ def _extract_sql_and_explanation(response_text: str) -> tuple[str, str, Optional
         explanation = re.sub(r"^explanation:\s*", "", explanation, flags=re.IGNORECASE).strip()
         return sql, explanation or "Generated SQL query based on provided schema.", None
 
-    # 3. Fallback: Search for any SQL statement in plain text
-    raw_query_match = re.search(r"\b((?:SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b[\s\S]*?)(?:;|\n\n[A-Z]|$)", clean_text, re.IGNORECASE)
-
+    # 4. Fallback: Search for any SQL statement in plain text
+    raw_query_match = re.search(r"^\s*((?:SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b[\s\S]*?)(?:;|\n\n[A-Z]|$)", clean_text, re.IGNORECASE)
     if raw_query_match:
         sql = raw_query_match.group(1).strip()
         explanation = clean_text.replace(sql, "").strip()
         explanation = re.sub(r"^explanation:\s*", "", explanation, flags=re.IGNORECASE).strip()
         return sql, explanation or "Generated SQL query based on provided schema.", None
 
-    # 4. If no query could be extracted (e.g. model asks for clarification)
-    return "", clean_text, clean_text
+    # 5. If no query could be extracted (e.g. model asks for clarification)
+    cleaned_clar = re.sub(r"^(?:clarification|explanation):\s*", "", clean_text, flags=re.IGNORECASE).strip()
+    return "", cleaned_clar, cleaned_clar
 
 
 class QueryGenerator:
@@ -172,6 +181,10 @@ class QueryGenerator:
                     if t_clean not in conversational_tables:
                         conversational_tables.append(t_clean)
 
+        # Check for active pending clarification on state
+        pending = getattr(state, "pending_clarification", None)
+        schema_lookup_question = f"{pending.original_question} {question}" if pending else question
+
         if not schema or not schema.tables:
             schema_context = f"Database '{profile.name}' is currently empty (contains no tables yet)."
             is_full_cov = True
@@ -181,7 +194,7 @@ class QueryGenerator:
             # 2. Extract deterministic relevant schema context with join path & multi-turn preservation
             schema_context, is_full_cov, coverage_summary, selected_tables = get_relevant_schema_context(
                 schema,
-                question=question,
+                question=schema_lookup_question,
                 max_tables=12,
                 conversational_tables=conversational_tables,
             )
@@ -209,48 +222,112 @@ class QueryGenerator:
             history_prompt = (
                 "Relevant Conversation History:\n"
                 + "\n".join(history_context)
-                + "\nNote: If the current question is a follow-up to a previous question, adapt or modify the previous query draft.\n\n"
+                + "\nNote: If the current question is a follow-up to a previous question, adapt or modify the previous query draft. Re-use previously established definitions and metrics.\n\n"
             )
+
+        # 3.5 Build pending clarification context if active
+        pending_prompt = ""
+        if pending:
+            p_lines = [
+                "ACTIVE PENDING CLARIFICATION DIALOGUE:",
+                f"Original User Request: {pending.original_question}",
+                f"Clarification Question Asked: {pending.clarification_question}",
+            ]
+            if pending.clarifications_history:
+                p_lines.append("Prior Clarifications in this dialogue:")
+                for pq, pa in pending.clarifications_history:
+                    p_lines.append(f"  - Asked: {pq} -> Answer: {pa}")
+            p_lines.extend([
+                f"User Current Input: {question}",
+                "",
+                "Instructions for Pending Clarification:",
+                "1. If the user's input answers the clarification question, synthesize the original request with the clarification answer into a single, complete SQL statement (Option 1).",
+                "2. If the user's input is an incomplete answer, still ambiguous, or needs further clarification, ask another focused clarification question (Option 2).",
+                "3. If the user's input is NOT answering the clarification, but is instead switching topics, asking a new unrelated question, or making a new request (e.g., 'Show all products', 'Count all users'), ignore the pending clarification and fulfill the new request directly.",
+                "",
+            ])
+            pending_prompt = "\n".join(p_lines) + "\n"
 
         # 4. Construct prompt with explicit dialect rules
         dialect_hints = {
-            Dialect.POSTGRES: "Use PostgreSQL syntax. Use LIMIT for row limits. Use EXTRACT(field FROM col) for date parts.",
-            Dialect.MYSQL: "Use MySQL syntax. Use LIMIT for row limits. Use backticks for reserved names.",
-            Dialect.SQLITE: "Use SQLite syntax. Use LIMIT for row limits. Use strftime() for date formatting.",
-            Dialect.MSSQL: "Use Microsoft SQL Server (T-SQL) syntax. Use TOP (n) or OFFSET ... FETCH for row limits.",
+            Dialect.POSTGRES: (
+                "Use PostgreSQL syntax. Use LIMIT for row limits. "
+                "For bounded DELETE or UPDATE (e.g. delete/update N records), PostgreSQL does NOT support direct 'DELETE ... LIMIT'. "
+                "Always use a subquery or CTE with explicit ordering, e.g.: "
+                "'DELETE FROM table WHERE id IN (SELECT id FROM table [WHERE ...] ORDER BY created_at ASC, id ASC LIMIT n);'"
+            ),
+            Dialect.MYSQL: (
+                "Use MySQL syntax. Use LIMIT for row limits. Use backticks for reserved names. "
+                "For bounded DELETE or UPDATE, MySQL natively supports direct LIMIT with ORDER BY: "
+                "'DELETE FROM table [WHERE ...] ORDER BY created_at ASC, id ASC LIMIT n;'"
+            ),
+            Dialect.SQLITE: (
+                "Use SQLite syntax. Use LIMIT for row limits. "
+                "For bounded DELETE or UPDATE, use a subquery with explicit ordering: "
+                "'DELETE FROM table WHERE id IN (SELECT id FROM table [WHERE ...] ORDER BY created_at ASC, id ASC LIMIT n);'"
+            ),
+            Dialect.MSSQL: (
+                "Use Microsoft SQL Server (T-SQL) syntax. "
+                "For bounded DELETE, use TOP (n) with parentheses or a CTE: "
+                "'WITH cte AS (SELECT TOP (n) * FROM table [WHERE ...] ORDER BY created_at ASC, id ASC) DELETE FROM cte;' "
+                "or 'DELETE TOP (n) FROM table;'"
+            ),
         }
         dialect_hint = dialect_hints.get(profile.dialect, "Use standard ANSI SQL.")
 
         system_instructions = (
-            f"You are an expert SQL generator for {dialect_name.upper()}.\n"
-            f"Your task is to convert the user's natural language request into a single, correct SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, ALTER TABLE, CREATE INDEX, etc.).\n\n"
+            f"You are an expert SQL generator and database assistant for {dialect_name.upper()}.\n"
+            f"Your task is to convert the user's natural language request into a single, correct SQL statement (SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, ALTER TABLE, CREATE INDEX, etc.), OR ask a focused clarification question if the request is ambiguous or under-specified.\n\n"
             f"DIALECT RULES:\n"
             f"- Target dialect: {dialect_name.upper()}\n"
             f"- {dialect_hint}\n\n"
             f"RULES & CONSTRAINTS:\n"
-            f"1. Generate a single, accurate SQL statement matching the user's intent.\n"
+            f"1. Generate a single, accurate SQL statement matching the user's intent when the request provides sufficient information.\n"
             f"2. For read requests, generate SELECT queries with explicit projections where practical.\n"
             f"3. For schema requests, generate clean DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX) compatible with {dialect_name.upper()}.\n"
-            f"4. For record modifications, generate parameterized or safe INSERT, UPDATE, or DELETE statements with explicit WHERE conditions.\n"
+            f"4. MUTATION GUIDELINES (INSERT, UPDATE, DELETE):\n"
+            f"   - Explicit Quantity + Selection: When deleting or updating a specific bounded number of records (e.g. 'delete the oldest 5 users', 'archive the newest 3 orders'), generate a dialect-appropriate bounded mutation with deterministic ordering (ORDER BY) and a stable tie-breaker (such as the primary key).\n"
+            f"   - Explicit Quantity + Unspecified Selection: When the user asks to delete or update a specific number of records without specifying WHICH records to select (e.g. 'Delete 5 users', 'Delete 5 users from users table', 'Update 10 orders'), DO NOT silently invent selection criteria. Choose Option 2 and ask which records to select.\n"
+            f"   - Explicit Full-Table Operations: When the user explicitly requests an operation on all records (e.g. 'delete all records from temporary_logs', 'archive all orders', 'set the status of all orders to archived'), generate the unrestricted DELETE or UPDATE without a WHERE clause.\n"
+            f"   - Vague Destructive Requests: When a destructive request is vague or missing criteria (e.g. 'delete the old records', 'clean up the data'), choose Option 2 and ask for clarification.\n"
             f"5. SENSITIVE DATA PROTECTION: For SELECT queries, NEVER select sensitive credential, password, secret, or token fields. Prefer explicit non-sensitive columns over SELECT *.\n"
             f"6. NEVER generate multi-statement SQL.\n"
-            f"7. TYPOS AND UNDERSPECIFIED REQUESTS:\n"
-            f"   - Freely interpret the overall intent of the user's message, tolerating misspellings and conversational phrasing.\n"
-            f"   - NEVER create column names from command words, instruction words, or typos.\n"
-            f"   - If the user asks to create a table without specifying columns, either ask for clarification on the columns, or propose a clean, standard schema appropriate for the entity.\n"
-            f"8. If the request is ambiguous or requires clarification before proceeding, explain what is needed without inventing artificial structures.\n\n"
+            f"7. DIRECT VS. AMBIGUOUS REQUEST HANDLING:\n"
+            f"   - When a request provides concrete entities, filters, counts, standard ordering, or established context, generate SQL directly:\n"
+            f"     * 'Show the first 10 users' -> generate SQL directly (LIMIT 10)\n"
+            f"     * 'Count all orders' -> generate SQL directly (COUNT(*))\n"
+            f"     * 'Find orders placed in the last 7 days' -> generate SQL directly (filter on date)\n"
+            f"     * 'Show users who have never placed an order' -> generate SQL directly (LEFT JOIN ... WHERE IS NULL)\n"
+            f"     * 'Find the highest order value' -> generate SQL directly (MAX(total_amount))\n"
+            f"     * 'Show orders with their associated user names' -> direct JOIN users\n"
+            f"     * 'Delete the oldest 5 users' -> Clear bounded deletion! Generate bounded DELETE with deterministic ORDER BY created_at ASC, id ASC\n"
+            f"     * 'Delete 10 completed orders' -> Clear bounded deletion with filter! Generate bounded DELETE WHERE status = 'completed' ORDER BY id ASC LIMIT 10\n"
+            f"     * 'Delete all records from temporary_logs' -> Clear explicit full-table deletion! Generate DELETE FROM temporary_logs;\n"
+            f"     * 'Set the status of all orders to archived' -> Clear explicit full-table update! Generate UPDATE orders SET status = 'archived';\n"
+            f"     * 'Set the status of the oldest 5 pending orders to archived' -> Clear bounded update! Generate UPDATE with WHERE status = 'pending' and ordered limit\n"
+            f"   - When a request lacks essential criteria to determine the target, ranking metric, or condition without guessing, DO NOT invent arbitrary filters, metrics, or thresholds:\n"
+            f"     * 'Delete 5 users' -> Ambiguous selection! Ask which 5 users should be selected (e.g. oldest, newest, by ID)\n"
+            f"     * 'Find the best customers' -> ask what metric defines 'best' (e.g. total purchase value, number of orders)\n"
+            f"     * 'Show me the important records' -> ask which table and what determines importance\n"
+            f"     * 'Show the top users' -> ask what metric to rank users by (e.g. number of orders, total spending)\n"
+            f"     * 'Delete the old records' -> ask which table/records to delete and what age threshold to use\n"
+            f"   - Reusing established definitions: If a metric or definition was already established or clarified earlier in the conversation history (e.g. 'best customers' was defined as highest total spending), REUSE that established definition instead of asking again.\n\n"
             f"DATABASE SCHEMA:\n"
             f"{schema_context}\n\n"
             f"OUTPUT FORMAT:\n"
-            f"Respond with a SQL code block followed by a brief explanation:\n"
+            f"Choose EXACTLY ONE of the two formats below:\n\n"
+            f"Option 1 — When the request is clear and actionable:\n"
             f"```sql\n"
             f"<SQL statement>\n"
             f"```\n"
             f"Explanation:\n"
-            f"<concise description of how the SQL answers the user request>\n"
+            f"<concise description of how the SQL answers the user request>\n\n"
+            f"Option 2 — When the request is ambiguous, under-specified, or missing essential criteria:\n"
+            f"Clarification:\n"
+            f"<focused question asking the user for the specific missing criterion, metric, or threshold>\n"
         )
 
-        full_prompt = f"{system_instructions}\n{history_prompt}Current User Question: {question}"
+        full_prompt = f"{system_instructions}\n{history_prompt}{pending_prompt}Current User Question: {question}"
         if tracker:
             tracker.stage_durations["prompt_construction"] = (
                 tracker.stage_durations.get("prompt_construction", 0.0) + (time.perf_counter() - t_pc0) * 1000.0
@@ -268,7 +345,7 @@ class QueryGenerator:
                     prompt=full_prompt,
                     provider=target_provider,
                     model=target_model,
-                    settings=GenerationSettings(temperature=0.1, timeout=30.0),
+                    settings=GenerationSettings(temperature=0.1, timeout=45.0),
                 )
             dur_ms = (time.perf_counter() - t_llm0) * 1000.0
             raw_text = resp.text
@@ -311,6 +388,38 @@ class QueryGenerator:
         # 6. Parse response
         sql, explanation, clarification = _extract_sql_and_explanation(raw_text)
 
+        # 6.1 If clarification is requested by the model, return draft directly without SQL validation
+        if clarification and not sql:
+            state.set_model_status(
+                state.provider_status or "Available",
+                generation_tested=True,
+                generation_status="Passed",
+            )
+            return QueryDraft(
+                question=question,
+                sql="",
+                explanation=explanation or clarification,
+                dialect=dialect_name,
+                validation_status="Clarification needed",
+                is_validated=False,
+                is_parsed=False,
+                schema_status="Not checked",
+                is_schema_verified=None,
+                tables_used=[],
+                unknown_tables=[],
+                unknown_columns=[],
+                provider=target_provider,
+                model=target_model,
+                raw_response=raw_text,
+                schema_coverage=coverage_summary,
+                clarification=clarification,
+            )
+
+        effective_draft_question = question
+        pending = getattr(state, "pending_clarification", None)
+        if sql and pending:
+            effective_draft_question = f"{pending.original_question} ({question})"
+
         # 6.5 Deterministically expand wildcard projections on sensitive tables
         if sql and schema:
             import sqlglot
@@ -337,6 +446,16 @@ class QueryGenerator:
                 raw_response=raw_text,
                 schema_coverage=coverage_summary,
             )
+
+        mutation_scope = "READ_ONLY"
+        mutation_limit = None
+        is_bounded = False
+        is_deterministic = False
+        determinism_reason = None
+        is_unrestricted = False
+        selection_criteria = None
+        target_table = None
+        is_ordered = False
 
         # 8. Validate SQL independently via AST and verify schema alignment
         t_val0 = time.perf_counter()
@@ -365,6 +484,15 @@ class QueryGenerator:
             unknown_cols = val_res.unknown_columns
             detected_operation = val_res.operation
             is_readonly = val_res.is_readonly
+            mutation_scope = val_res.mutation_scope
+            mutation_limit = val_res.mutation_limit
+            is_bounded = val_res.is_bounded
+            is_deterministic = val_res.is_deterministic
+            determinism_reason = val_res.determinism_reason
+            is_unrestricted = val_res.is_unrestricted
+            selection_criteria = val_res.selection_criteria
+            target_table = val_res.target_table
+            is_ordered = val_res.is_ordered
 
         if tracker:
             tracker.stage_durations["sql_validation"] = (
@@ -428,7 +556,13 @@ class QueryGenerator:
                 )
                 break
 
-            if not suggestions and "parse" not in validation_status.lower() and "syntax" not in validation_status.lower():
+            if (
+                not suggestions
+                and "parse" not in validation_status.lower()
+                and "syntax" not in validation_status.lower()
+                and "not supported" not in validation_status.lower()
+                and "limit" not in validation_status.lower()
+            ):
                 break
 
             repair_attempts += 1
@@ -501,6 +635,15 @@ class QueryGenerator:
                         unknown_cols = rep_val.unknown_columns
                         detected_operation = rep_val.operation
                         is_readonly = rep_val.is_readonly
+                        mutation_scope = rep_val.mutation_scope
+                        mutation_limit = rep_val.mutation_limit
+                        is_bounded = rep_val.is_bounded
+                        is_deterministic = rep_val.is_deterministic
+                        determinism_reason = rep_val.determinism_reason
+                        is_unrestricted = rep_val.is_unrestricted
+                        selection_criteria = rep_val.selection_criteria
+                        target_table = rep_val.target_table
+                        is_ordered = rep_val.is_ordered
                         correction_notes = f"Schema-grounded correction applied (attempt {repair_attempts})"
                         break
                     else:
@@ -525,7 +668,7 @@ class QueryGenerator:
         )
 
         return QueryDraft(
-            question=question,
+            question=effective_draft_question,
             sql=sql,
             explanation=explanation,
             dialect=dialect_name,
@@ -546,6 +689,15 @@ class QueryGenerator:
             raw_response=raw_text,
             correction_notes=correction_notes,
             repair_attempts=repair_attempts,
+            mutation_scope=mutation_scope,
+            mutation_limit=mutation_limit,
+            is_bounded=is_bounded,
+            is_deterministic=is_deterministic,
+            determinism_reason=determinism_reason,
+            is_unrestricted=is_unrestricted,
+            selection_criteria=selection_criteria,
+            target_table=target_table,
+            is_ordered=is_ordered,
         )
 
     def repair_execution_failure(

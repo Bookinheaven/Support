@@ -31,3 +31,17 @@ class QueryDraft:
     correction_notes: Optional[str] = None
     repair_attempts: int = 0
     post_exec_repaired: bool = False
+    mutation_scope: str = "READ_ONLY"
+    mutation_limit: Optional[int] = None
+    is_bounded: bool = False
+    is_deterministic: bool = False
+    determinism_reason: Optional[str] = None
+    is_unrestricted: bool = False
+    selection_criteria: Optional[str] = None
+    target_table: Optional[str] = None
+    is_ordered: bool = False
+
+    @property
+    def is_clarification(self) -> bool:
+        """True if the draft represents a clarification question rather than an executable SQL statement."""
+        return bool(self.clarification and self.clarification.strip() and not self.sql)

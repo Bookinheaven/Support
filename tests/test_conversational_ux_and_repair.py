@@ -219,11 +219,13 @@ def test_details_command_displays_diagnostics_without_cluttering_draft(sample_st
     with patch("support.query.display.console", draft_console):
         display_query_draft(draft, db_name="testdb", dialect_name="postgres")
         draft_text = draft_console.file.getvalue()
-        assert "Query ready · Schema verified" in draft_text
-        assert "Database: testdb (postgres) · Read-only: Enforced" in draft_text
+        assert "Query ready · Schema verified" not in draft_text
+        assert "Database: testdb (postgres) · Read-only: Enforced" not in draft_text
         assert "Parsing: Successful" not in draft_text
         assert "Validation: Passed" not in draft_text
         assert "Schema Context:" not in draft_text
+        assert "SQL:" in draft_text
+        assert "SELECT id, username FROM users LIMIT 10;" in draft_text
 
     # Test /details output
     details_console = Console(file=StringIO(), color_system=None)

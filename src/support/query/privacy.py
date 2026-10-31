@@ -57,6 +57,20 @@ def get_schema_sensitive_columns(schema: DatabaseSchema) -> dict[str, list[str]]
     return result
 
 
+def extract_projected_expressions(stmt: exp.Expression) -> list[exp.Expression]:
+    """Extract projected/output expressions from a query AST (Select, Union, or Returning clauses)."""
+    projections: list[exp.Expression] = []
+    if hasattr(stmt, "selects") and stmt.selects:
+        projections.extend(stmt.selects)
+
+    # Also inspect RETURNING clauses on DML statements (DELETE, UPDATE, INSERT)
+    returning = stmt.find(exp.Returning)
+    if returning and hasattr(returning, "expressions"):
+        projections.extend(returning.expressions)
+
+    return projections
+
+
 def identify_sensitive_projections(
     stmt: exp.Expression,
     schema: Optional[DatabaseSchema] = None,
@@ -72,7 +86,7 @@ def identify_sensitive_projections(
                 if is_sensitive_column_name(c.name):
                     schema_sensitive_cols.add(c.name.lower())
 
-    for sel in stmt.selects:
+    for sel in extract_projected_expressions(stmt):
         output_name = sel.output_name.lower() if sel.output_name else ""
         if is_sensitive_column_name(output_name):
             sensitive_found.append(sel.output_name)
@@ -93,7 +107,8 @@ def has_sensitive_wildcard(
     schema: Optional[DatabaseSchema] = None,
 ) -> tuple[bool, list[str]]:
     """Check if query contains wildcard projections on tables containing sensitive fields."""
-    has_star = any(isinstance(sel, exp.Star) or sel.find(exp.Star) is not None for sel in stmt.selects)
+    projections = extract_projected_expressions(stmt)
+    has_star = any(isinstance(sel, exp.Star) or sel.find(exp.Star) is not None for sel in projections)
     if not has_star:
         return False, []
 

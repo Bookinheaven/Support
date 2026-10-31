@@ -8,8 +8,55 @@ from support.core.formatting import format_duration
 from support.db.service import DatabaseService
 from support.query.display import display_execution_preview, display_query_result
 from support.query.executor import ExecutionConfig, QueryResult, ReadOnlyQueryExecutor
+from support.query.models import QueryDraft
 from support.query.validator import validate_sql_query
 from support.workspace.state import WorkspaceSessionState
+
+
+def _estimate_affected_rows(draft: "QueryDraft", state: WorkspaceSessionState, dbs: DatabaseService) -> Optional[int]:
+    """Safely derive or estimate affected row count for a mutation."""
+    if getattr(draft, "is_readonly", True):
+        return None
+
+    target_tbl = getattr(draft, "target_table", None)
+    if not target_tbl or not state.database_profile:
+        return getattr(draft, "mutation_limit", None)
+
+    try:
+        from support.db.connection import DatabaseConnectionFactory
+        from sqlalchemy import text
+        password: Optional[str] = None
+        try:
+            _, password = dbs.manager.get_profile_with_password(state.active_database)
+        except Exception:
+            pass
+        engine = DatabaseConnectionFactory.create_engine(
+            state.database_profile,
+            password=password,
+            timeout=2,
+            readonly=True,
+        )
+        with engine.connect() as conn:
+            if getattr(draft, "is_unrestricted", False):
+                count_res = conn.execute(text(f"SELECT COUNT(*) FROM {target_tbl}"))
+                val = count_res.scalar()
+                engine.dispose()
+                return int(val) if val is not None else None
+            elif getattr(draft, "selection_criteria", None):
+                crit = draft.selection_criteria
+                count_res = conn.execute(text(f"SELECT COUNT(*) FROM {target_tbl} WHERE {crit}"))
+                val = count_res.scalar()
+                engine.dispose()
+                if val is not None:
+                    count_val = int(val)
+                    if getattr(draft, "is_bounded", False) and getattr(draft, "mutation_limit", None) is not None:
+                        return min(count_val, draft.mutation_limit)
+                    return count_val
+        engine.dispose()
+    except Exception:
+        pass
+
+    return getattr(draft, "mutation_limit", None)
 
 
 def handle_run_command(
@@ -44,7 +91,7 @@ def handle_run_command(
 
     # 3. Require active draft
     draft = state.last_query_draft
-    if not draft or not draft.sql:
+    if not draft or not draft.sql or getattr(draft, "is_clarification", False):
         console.print("[bold yellow]No active query draft to execute.[/bold yellow]")
         console.print("[dim]Ask a natural-language question first to generate a query draft.[/dim]\n")
         return False
@@ -108,16 +155,23 @@ def handle_run_command(
         return False
 
     # 8. Display execution preview
+    affected_estimate = _estimate_affected_rows(draft, state, dbs)
     display_execution_preview(
         draft=draft,
         profile_name=state.active_database,
         dialect_name=state.database_profile.dialect.value,
         config=cfg,
+        affected_row_estimate=affected_estimate,
     )
 
     # 9. Explicit user approval defaulting to No
+    if getattr(draft, "is_unrestricted", False):
+        prompt_label = f"Approve FULL-TABLE {reval.operation} affecting ALL records in '{draft.target_table}'? [y/N]: "
+    else:
+        prompt_label = f"Approve execution of {reval.operation}? [y/N]: "
+
     try:
-        raw_answer = user_input_func(f"Approve execution of {reval.operation}? [y/N]: ")
+        raw_answer = user_input_func(prompt_label)
     except (KeyboardInterrupt, EOFError):
         console.print("\n[yellow]Execution cancelled. No queries were executed.[/yellow]\n")
         return False
@@ -273,6 +327,7 @@ def handle_conversational_execution(
     # Only eligible drafts are asked for execution
     if (
         not draft.sql
+        or getattr(draft, "is_clarification", False)
         or not draft.is_validated
         or draft.unknown_tables
     ):
@@ -294,7 +349,23 @@ def handle_conversational_execution(
         return False
 
     # Prompt user for explicit approval
-    prompt_str = "Execute this read-only query? [y/N]: " if reval.is_readonly else f"Approve execution of {reval.operation}? [y/N]: "
+    affected_estimate = None
+    if not reval.is_readonly:
+        from support.query.display import display_mutation_preview
+        affected_estimate = _estimate_affected_rows(draft, state, dbs)
+        display_mutation_preview(
+            draft=draft,
+            profile_name=state.active_database,
+            dialect_name=state.database_profile.dialect.value,
+            affected_row_estimate=affected_estimate,
+        )
+        if getattr(draft, "is_unrestricted", False):
+            prompt_str = f"Approve FULL-TABLE {reval.operation} affecting ALL records in '{draft.target_table}'? [y/N]: "
+        else:
+            prompt_str = "Approve execution? [y/N]: "
+    else:
+        prompt_str = "Execute this read-only query? [y/N]: "
+
     try:
         raw_answer = user_input_func(prompt_str)
     except (KeyboardInterrupt, EOFError):

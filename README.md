@@ -4,8 +4,8 @@
 
 **The AI-Powered Multi-Database Terminal Workspace & Natural Language SQL Engine**
 
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests Passing](https://img.shields.io/badge/tests-317%20passed%20(100%25)-success.svg?style=for-the-badge&logo=pytest&logoColor=white)](#running-tests)
+[![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Tests Passing](https://img.shields.io/badge/tests-330%20passed%20(100%25)-success.svg?style=for-the-badge&logo=pytest&logoColor=white)](#running-tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Engines](https://img.shields.io/badge/databases-Postgres%20%7C%20MySQL%20%7C%20SQLite%20%7C%20MSSQL%20%7C%20Mongo-orange.svg?style=for-the-badge&logo=database)](https://github.com/Bookinheaven/Support)
 [![LLM Providers](https://img.shields.io/badge/LLMs-Ollama%20%7C%20Gemini%20%7C%20Grok-8A2BE2.svg?style=for-the-badge&logo=openai)](https://github.com/Bookinheaven/Support)
@@ -13,7 +13,8 @@
 
 <br/>
 
-[Quickstart](#quickstart-in-60-seconds) •
+[Overview](#overview) •
+[Installation Guide](#installation--setup-guide) •
 [Interactive REPL](#interactive-terminal-workspace) •
 [Architecture](#architecture--data-flow) •
 [Supported Databases](#supported-databases) •
@@ -34,6 +35,7 @@
 Unlike simple Text-to-SQL scripts that blindly execute hallucinated queries, **Support** introduces an enterprise-grade execution pipeline:
 - **Deterministic Intent Routing**: Bypasses slow LLM tool loops for ordinary queries, reducing response times by **7–12 seconds**.
 - **Conservative Schema Selection**: Semantically scores and isolates relevant tables, slashing prompt tokens by **60–80%** on complex databases.
+- **Proactive Clarification Dialogue**: Recognizes ambiguous or underspecified requests (e.g. undefined metrics, vague ranking criteria, or ambiguous deletion targets) and asks focused clarification questions rather than inventing criteria.
 - **AST Safety & Dialect Validation**: Parses every generated query with **SQLGlot** to guarantee read-only query semantics, prevent injection attacks, and detect invalid column references before reaching the driver.
 - **Autonomous Self-Repair Feedback**: Catches compiler or database execution errors, automatically reprompting the model with error context and schema constraints to generate a validated fix.
 - **Hardware-Enforced OS Keyring Security**: Zero plaintext credentials in `.env` files; API keys and database passwords are encrypted via Windows Credential Manager, macOS Keychain, or Linux Secret Service.
@@ -87,66 +89,237 @@ support>
 
 ---
 
-## Quickstart in 60 Seconds
+## Installation & Setup Guide
 
-### 1. Installation
+This comprehensive guide walks you step-by-step through setting up **Support** from source, configuring your local or cloud LLM provider, connecting your database, and exploring the interactive clarification dialogue.
 
-Clone the repository and install dependencies in an isolated virtual environment:
+### 1. Prerequisites & Supported Environment
+
+Before installing Support, verify your system meets the following requirements:
+
+- **Operating System**: Linux (Ubuntu 20.04+, Debian, Fedora, Arch), macOS (12.0+ Monterey or later), or Windows 10/11 (native PowerShell or WSL2).
+- **Python Runtime**: **Python 3.11 or higher** (`python --version` or `python3 --version`). Tested across Python 3.11, 3.12, 3.13, and 3.14.
+- **Git**: Installed and configured on your PATH (`git --version`).
+- **LLM Provider**:
+  - **Local Ollama** (*recommended for private, offline usage*): [Ollama](https://ollama.com) installed locally.
+  - *Or* Cloud API credentials for **Google Gemini** or **xAI Grok**.
+- **Optional**: Docker and Docker Compose (if you wish to use the pre-configured local multi-database testing stack).
+
+### 2. Clone the Repository
+
+Clone the Support repository to your local machine:
 
 ```bash
 git clone https://github.com/Bookinheaven/Support.git
 cd Support
+```
 
-# Create and activate virtual environment
+### 3. Create & Activate a Python Virtual Environment
+
+Always install Support in an isolated Python virtual environment:
+
+```bash
+# Create the virtual environment (.venv)
 python -m venv .venv
+```
 
-# On Linux/macOS:
-source .venv/bin/activate
+Activate the environment based on your operating system:
 
-# On Windows (PowerShell):
-.\.venv\Scripts\Activate.ps1
+- **Linux / macOS**:
+  ```bash
+  source .venv/bin/activate
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  .\.venv\Scripts\Activate.ps1
+  ```
+  *(If you encounter execution policy restrictions on Windows, run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`)*
+- **Windows (Command Prompt / CMD)**:
+  ```cmd
+  .\.venv\Scripts\activate.bat
+  ```
 
-# Install in editable mode
+### 4. Install Dependencies
+
+Support provides a modular dependency architecture defined in `pyproject.toml`. You can install the base package or include database driver extras:
+
+```bash
+# Option A: Core installation (includes SQLite support, CLI, AST parser, and Ollama/REST client)
 pip install -e .
+
+# Option B: Complete installation with all database drivers (Postgres, MySQL, MSSQL, Mongo)
+pip install -e ".[all-drivers]"
+
+# Option C: Selective engine drivers based on your database stack
+pip install -e ".[postgres]"   # Adds psycopg (v3)
+pip install -e ".[mysql]"      # Adds pymysql
+pip install -e ".[mssql]"      # Adds pymssql
+pip install -e ".[mongo]"      # Adds pymongo
+
+# Optional: Install development & testing dependencies (pytest)
+pip install -e ".[dev]"
 ```
 
-### 2. Connect Your Database
+### 5. Setup Local Ollama & Model Configuration
 
-Register a database profile using a standard connection string or interactive prompts:
+Support defaults to using local Ollama for 100% private, offline inference with zero API costs:
 
+1. **Download & Install Ollama**: Visit [ollama.com](https://ollama.com) or run:
+   - Linux: `curl -fsSL https://ollama.com/install.sh | sh`
+   - macOS: `brew install ollama`
+   - Windows: Download the official installer from [ollama.com/download/windows](https://ollama.com/download/windows).
+
+2. **Start the Ollama Background Service**:
+   ```bash
+   ollama serve
+   ```
+
+3. **Pull the Recommended Coding Model**:
+   ```bash
+   # Pull the high-performance Qwen 2.5 Coder 7B model
+   ollama pull qwen2.5-coder:7b
+   ```
+   *(Alternative supported local models: `deepseek-coder-v2`, `llama3.3:70b`, `codellama`)*
+
+### 6. Configure LLM Providers & Credentials
+
+Support includes a built-in multi-provider LLM gateway. You can easily switch between local models and cloud providers:
+
+#### Option A: Local Ollama (Default — No API keys required)
 ```bash
-# Add a PostgreSQL profile via URL:
-support db add --name dev-pg --url "postgresql://support_dev:dev_pg_pass_2026@127.0.0.1:5435/support_dev"
-
-# Add a local SQLite database:
-support db add --name local-db --url "sqlite:///examples/sample.db"
-
-# Or use the interactive prompt:
-support db add
-```
-
-### 3. Configure Your LLM Provider
-
-Support works out of the box with **Local Ollama** (default, 100% offline & private) as well as **Google Gemini** and **xAI Grok**:
-
-```bash
-# Option A: Local Ollama (Default - No API key needed)
 support models use ollama --model qwen2.5-coder:7b
+```
 
-# Option B: Google Gemini (Securely stored in OS Keyring)
+#### Option B: Google Gemini
+```bash
+# Securely store API key in your operating system's native keychain
 support auth login gemini
-support models use gemini --model gemini-2.0-flash
+# (Paste your Gemini API key when prompted; characters are masked)
 
-# Option C: xAI Grok (Securely stored in OS Keyring)
+support models use gemini --model gemini-2.0-flash
+```
+
+#### Option C: xAI Grok
+```bash
+# Securely store API key in your operating system's native keychain
 support auth login grok
+# (Paste your xAI API key when prompted; characters are masked)
+
 support models use grok --model grok-2-latest
 ```
 
-### 4. Launch the Workspace
+#### Verify Provider Configuration
+```bash
+# Check stored credentials and active keyring backend
+support auth status
+
+# Verify current active provider, model, and inference parameters
+support models current
+
+# Run a live test roundtrip to verify model connectivity
+support models test
+```
+
+### 7. Add & Configure Database Connections
+
+Support manages connection profiles securely with OS keyring password encryption.
+
+#### Method 1: Interactive Wizard
+Run the interactive database configuration wizard:
+```bash
+support db add
+```
+Follow the step-by-step prompts to select your database engine, host, port, credentials, and database name.
+
+#### Method 2: Connection URL Flags
+Alternatively, add a database profile directly using standard connection URIs:
+
+```bash
+# PostgreSQL:
+support db add --name dev-pg --url "postgresql://<username>:<password>@localhost:5432/<database>"
+
+# MySQL:
+support db add --name dev-mysql --url "mysql+pymysql://<username>:<password>@localhost:3306/<database>"
+
+# SQLite (Local file):
+support db add --name local-db --url "sqlite:///path/to/database.db"
+
+# Microsoft SQL Server:
+support db add --name dev-mssql --url "mssql+pymssql://<username>:<password>@localhost:1433/<database>"
+
+# MongoDB:
+support db add --name dev-mongo --url "mongodb://<username>:<password>@localhost:27017/<database>"
+```
+
+#### Test Connection Health
+```bash
+# Verify connection to a specific database profile
+support db test dev-pg
+
+# View all saved database profiles with live latency checks
+support db list
+```
+
+### 8. Running Support & Workspace Usage
+
+Start the interactive terminal workspace:
 
 ```bash
 support
 ```
+
+Once inside, Support connects to your default database and LLM model.
+
+#### Conversational Query Examples & Clarification Workflow
+
+1. **Direct Queries**: Concrete requests are answered immediately with validated SQL and query results:
+   ```text
+   support> Count all orders.
+   support> Show the first 10 users.
+   support> Find orders placed in the last 7 days.
+   ```
+
+2. **Proactive Clarification Dialogue**: When a request is ambiguous or underspecified, Support asks focused questions rather than inventing criteria:
+   ```text
+   support> Find the best customers.
+   Support (Clarification): What metric defines 'best' customers? (e.g. total purchase value, number of orders)
+   
+   support> Total purchase value.
+   Support: [Drafts validated SQL joining users and orders with SUM(total_amount), displays AST checks, and requests approval]
+   ```
+
+3. **Follow-Up Questions**: Conversations retain context seamlessly across turns:
+   ```text
+   support> Sort descending.
+   support> Show the top five.
+   ```
+
+4. **Destructive Guardrails**: Mutations (`DELETE`, `UPDATE`, `DROP`) require clarification if criteria are ambiguous, and always require explicit `[y/N]` approval before execution:
+   ```text
+   support> Delete the old records.
+   Support (Clarification): Which table/records should be deleted, and what age threshold to use?
+   
+   support> Orders older than one year.
+   Support (SQL Draft): DELETE FROM orders WHERE created_at < NOW() - INTERVAL '1 year';
+   Execute this query on 'dev-pg'? [y/N]:
+   ```
+
+5. **Canceling Clarifications**: At any time, you can cancel a pending clarification by typing `cancel`, `stop`, or `abort`:
+   ```text
+   support> cancel
+   Clarification discarded.
+   ```
+
+### 9. Troubleshooting Common Setup Issues
+
+| Problem | Cause | Resolution |
+|---|---|---|
+| `Ollama connection refused (http://localhost:11434)` | Ollama daemon is not running. | Start Ollama with `ollama serve` or launch the Ollama desktop application. |
+| `ModuleNotFoundError: No module named 'psycopg'` | Database driver package is missing. | Install the driver extra: `pip install -e ".[postgres]"` or `pip install -e ".[all-drivers]"`. |
+| `KeyringBackendError` or Keyring warning on Linux / Docker | Headless server or container lacks a GUI secret service daemon (DBus/GNOME Keyring). | Set environment variable `export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring` or install `dbus-x11`. |
+| Database connection timeout / refused | Target database container is down or port is blocked by firewall. | If using Docker, check `docker compose ps`. Verify host, port, and credentials using `support db test <name>`. |
+| PowerShell script execution disabled on Windows | Windows default execution policy prevents running unsigned activation scripts. | Open PowerShell and run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`. |
+
 
 ---
 
@@ -166,7 +339,10 @@ flowchart TD
     %% Query Pipeline
     SchemaRanker -->|Top-K Scored Tables + FK Graph| PromptBuilder[Prompt Context Assembly]
     PromptBuilder --> LLMGateway[LLM Gateway: Ollama / Gemini / Grok]
-    LLMGateway --> RawSQL[Generated SQL Draft]
+    LLMGateway --> ResponseType{Model Response Type}
+    ResponseType -->|Ambiguous Request| ClarificationPrompt[Clarification Question Prompted to User]
+    ClarificationPrompt -.->|User Response Resumes Request| PromptBuilder
+    ResponseType -->|Concrete Query| RawSQL[Generated SQL Draft]
 
     %% Validation & Security
     RawSQL --> ASTValidator{SQLGlot AST Validator}
@@ -191,6 +367,7 @@ flowchart TD
 | Feature | Support | Traditional Text-to-SQL | Raw LLM Agent Frameworks |
 |---|:---:|:---:|:---:|
 | **Turn Latency** | **Instant (< 1ms tool overhead)** | 1–3s | 8–15s (Multiple tool-calling round-trips) |
+| **Ambiguity Handling** | **Proactive Clarification Dialogue** | Hallucinates or guesses metrics | Guesses or executes bad queries |
 | **Schema Token Efficiency** | **Conservative Ranking (60–80% savings)** | Dumps full schema every time | Dumps full schema or calls expensive LLM tools |
 | **Safety Enforcement** | **SQLGlot AST Validation + Driver Read-Only** | None / Regex matching | Blind `db.execute(sql)` execution |
 | **Mutation Safeguards** | **Interactive [y/N] Confirmation + Transactions** | Allowed without warning | Unbounded modifications |
@@ -398,7 +575,7 @@ pytest -q
 ```
 
 ```text
-======================= 317 passed in 70.96s =======================
+======================= 330 passed in 71.83s =======================
 ```
 
 ---

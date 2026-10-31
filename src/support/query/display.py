@@ -17,6 +17,22 @@ if TYPE_CHECKING:
     from support.query.executor import ExecutionConfig, QueryResult
 
 
+def _get_validation_suggestion(reason: str, draft: QueryDraft) -> Optional[str]:
+    """Provide a concise, actionable suggestion for common validation rejections."""
+    lower_r = reason.lower()
+    if "unconditional delete" in lower_r or "unconditional update" in lower_r:
+        target = f" in '{draft.target_table}'" if draft.target_table else ""
+        return f"Specify a filter or row limit{target} (e.g., 'delete 5 newest users' or 'update users where status = inactive')."
+    if "direct limit" in lower_r:
+        return "Use a key-bounded subquery filter like 'WHERE id IN (SELECT id FROM ... LIMIT N)' on this dialect."
+    if "ambiguous" in lower_r or "clarification" in lower_r:
+        return "Provide more specific criteria or column names."
+    if "unknown table" in lower_r or getattr(draft, "unknown_tables", []):
+        tbls = ", ".join(draft.unknown_tables) if draft.unknown_tables else "specified table"
+        return f"Table '{tbls}' was not found. Use /schema to list accessible tables."
+    return None
+
+
 def display_query_draft(
     draft: QueryDraft,
     db_name: Optional[str] = None,
@@ -24,32 +40,48 @@ def display_query_draft(
     max_rows: int = 100,
     timeout_seconds: float = 10.0,
 ) -> None:
-    """Render a concise conversational query draft preview with safety summary."""
+    """Render a concise conversational query draft preview with clear execution status."""
     console.print()
 
-    # 1. Concise state header
+    # 0. Clarification request display
+    if getattr(draft, "is_clarification", False):
+        console.print(f"[bold cyan]{draft.clarification}[/bold cyan]\n")
+        return
+
+    # 1. Validation failure / rejected state
     if not draft.is_validated:
         reason = draft.validation_status
         if reason.startswith("Rejected: "):
             reason = reason[10:]
         console.print(f"[bold red]Query rejected · {reason}[/bold red]")
-    elif draft.is_schema_verified is True:
-        console.print("[bold green]Query ready · Schema verified[/bold green]")
-    elif draft.is_schema_verified is False:
-        console.print("[bold yellow]Draft ready · Schema needs clarification[/bold yellow]")
-    else:
-        console.print("[bold cyan]Draft ready[/bold cyan]")
+        if draft.target_table:
+            console.print(f"  [dim]Target table: {draft.target_table}[/dim]")
+        suggestion = _get_validation_suggestion(reason, draft)
+        if suggestion:
+            console.print(f"  [dim cyan]Suggestion: {suggestion}[/dim cyan]")
+        if draft.sql:
+            console.print()
+            console.print("[bold white]Draft SQL:[/bold white]")
+            syntax = Syntax(draft.sql.strip(), lexer="sql", theme="monokai", line_numbers=False, word_wrap=True)
+            console.print(syntax)
+        console.print()
+        return
 
-    # 2. Original question
-    if draft.question:
-        console.print(f"[bold white]Question:[/bold white] [dim]{draft.question}[/dim]")
+    # 2. Schema clarification needed
+    if draft.is_schema_verified is False:
+        console.print("[bold yellow]Schema clarification needed[/bold yellow]")
+        if draft.schema_status and draft.schema_status != "Not checked":
+            console.print(f"  [dim]{draft.schema_status}[/dim]")
 
-    # 3. Formatted SQL
+    # 3. Short explanation when useful
+    if draft.explanation and draft.explanation.strip():
+        console.print(f"[dim]{draft.explanation.strip()}[/dim]")
+
+    # 4. Single SQL preview
     if draft.sql:
-        console.print("[bold white]Draft SQL[/bold white]")
-        console.print("[dim]--------[/dim]")
+        console.print("[bold white]SQL:[/bold white]")
         syntax = Syntax(
-            draft.sql,
+            draft.sql.strip(),
             lexer="sql",
             theme="monokai",
             line_numbers=False,
@@ -58,29 +90,18 @@ def display_query_draft(
         console.print(syntax)
         console.print()
 
-    # 4. Explanation
-    if draft.explanation:
-        console.print(f"[bold white]Explanation:[/bold white] {draft.explanation}")
-        console.print()
-
-    # 5. Correction note if applicable
+    # 5. Correction note if query was repaired
     if draft.correction_notes:
-        console.print(f"[dim cyan]Correction note: {draft.correction_notes}[/dim cyan]")
-        console.print()
+        console.print(f"[dim cyan]Correction note: {draft.correction_notes}[/dim cyan]\n")
 
-    # 6. Compact safety summary
-    active_db = db_name or (draft.dialect if draft.dialect != "unknown" else "active database")
-    dialect_str = f" ({dialect_name})" if dialect_name and dialect_name != active_db else ""
-    timeout_str = format_timeout(timeout_seconds)
-    console.print(
-        f"[dim]Database: {active_db}{dialect_str} · Read-only: Enforced · Limits: Max {max_rows} rows, Timeout: {timeout_str}[/dim]"
-    )
-
-    # 7. Schema verification status
-    if draft.schema_status and draft.schema_status != "Not checked":
-        console.print(f"[dim]Schema status: {draft.schema_status}[/dim]")
-
-    console.print()
+    # 6. Standalone mutation summary (only when display_query_draft is called directly outside approval prompt)
+    if not draft.is_readonly:
+        if getattr(draft, "is_unrestricted", False):
+            console.print(f"[bold red]⚠️  Full-table mutation on '{draft.target_table or 'table'}'[/bold red]\n")
+        elif getattr(draft, "is_bounded", False) and getattr(draft, "mutation_limit", None):
+            console.print(f"[cyan]Bounded mutation · Maximum {draft.mutation_limit} records in '{draft.target_table or 'table'}'[/cyan]\n")
+        else:
+            console.print(f"[yellow]Filtered mutation · Target: '{draft.target_table or 'table'}'[/yellow]\n")
 
 
 def display_query_details(
@@ -99,6 +120,7 @@ def display_query_details(
 
     table.add_row("Question", draft.question or "[dim]N/A[/dim]")
     table.add_row("Database / Dialect", f"{db_name or 'N/A'} ({draft.dialect})")
+    table.add_row("Operation", f"{draft.operation} ({'Read-only' if draft.is_readonly else 'Mutation'})")
 
     provider_model = f"{draft.provider} / {draft.model}" if draft.provider else "[dim]N/A[/dim]"
     table.add_row("LLM Provider / Model", provider_model)
@@ -127,10 +149,26 @@ def display_query_details(
     if draft.unknown_columns:
         table.add_row("Unknown Columns", f"[red]{', '.join(draft.unknown_columns)}[/red]")
 
+    # Mutation scope diagnostics
+    if not draft.is_readonly:
+        table.add_row("Mutation Scope", getattr(draft, "mutation_scope", "N/A"))
+        table.add_row("Target Table", draft.target_table or "Unknown")
+        limit_str = f"{draft.mutation_limit} records" if getattr(draft, "is_bounded", False) else "None (Uncapped)"
+        table.add_row("Guaranteed Row Bound", limit_str)
+        table.add_row(
+            "Selection Determinism",
+            getattr(draft, "determinism_reason", "N/A")
+            or ("Deterministic" if getattr(draft, "is_deterministic", False) else "Nondeterministic"),
+        )
+        if getattr(draft, "selection_criteria", None):
+            table.add_row("Selection Criteria", draft.selection_criteria)
+
     table.add_row("Execution Status", f"[dim]{draft.execution_status}[/dim]")
 
     if draft.repair_attempts > 0:
         table.add_row("Repair Attempts", str(draft.repair_attempts))
+    if draft.explanation:
+        table.add_row("Full Explanation", draft.explanation)
     if draft.correction_notes:
         table.add_row("Correction Notes", draft.correction_notes)
 
@@ -163,26 +201,103 @@ def display_query_details(
     console.print("[dim]------------------------------------------------------------[/dim]\n")
 
 
+def display_mutation_preview(
+    draft: QueryDraft,
+    profile_name: str,
+    dialect_name: str,
+    affected_row_estimate: Optional[int] = None,
+) -> None:
+    """Render a compact mutation preview before approval with clear limits, selection, and warnings."""
+    console.print()
+    is_unres = getattr(draft, "is_unrestricted", False)
+
+    # 1. Title / Header
+    if is_unres:
+        console.print(f"[bold red]⚠️  WARNING: FULL-TABLE {draft.operation} OPERATION[/bold red]")
+        console.print(
+            f"[bold red]This operation will modify or delete ALL records in '{draft.target_table or 'table'}' without row limit or filter.[/bold red]\n"
+        )
+    elif draft.question and draft.question.strip():
+        q_text = draft.question.strip()
+        if not q_text.endswith("?"):
+            q_text = q_text[0].upper() + q_text[1:] + "?"
+        console.print(f"[bold white]{q_text}[/bold white]\n")
+    else:
+        op_title = draft.operation.title() if draft.operation else "Mutation"
+        console.print(f"[bold white]{op_title} records in '{draft.target_table or 'table'}'?[/bold white]\n")
+
+    # 2. Database and Target
+    active_db = profile_name or "active database"
+    dialect_str = f" ({dialect_name})" if dialect_name and dialect_name != active_db else ""
+    console.print(f"  [bold white]Database:[/bold white]  {active_db}{dialect_str}")
+    console.print(f"  [bold white]Target:[/bold white]    {draft.target_table or 'Unknown'}")
+
+    # 3. Selection & Row Bounds
+    if is_unres:
+        console.print("  [bold white]Selection:[/bold white] [bold red]None (Entire table targeted)[/bold red]")
+        if affected_row_estimate is not None:
+            console.print(f"  [bold white]Estimated affected:[/bold white] ~{affected_row_estimate} rows [dim](entire table)[/dim]")
+        console.print("  [bold white]Guaranteed maximum:[/bold white] [bold red]None (Unrestricted - all table rows)[/bold red]")
+    elif getattr(draft, "is_bounded", False) and getattr(draft, "mutation_limit", None) is not None:
+        limit_cnt = draft.mutation_limit
+        if getattr(draft, "is_ordered", False):
+            if getattr(draft, "is_deterministic", False):
+                sql_upper = draft.sql.upper()
+                if "DESC" in sql_upper and any(k in draft.sql.lower() for k in ("created", "date", "time", "id")):
+                    order_label = "Newest first"
+                elif "ASC" in sql_upper and any(k in draft.sql.lower() for k in ("created", "date", "time", "id")):
+                    order_label = "Oldest first"
+                else:
+                    order_label = "Ordered with unique tie-breaker"
+            else:
+                order_label = "Ordered (ties may be arbitrary)"
+        else:
+            order_label = "Arbitrary selection (no ORDER BY)"
+
+        console.print(f"  [bold white]Selection:[/bold white] {order_label} · [cyan]Maximum {limit_cnt} records[/cyan]")
+        if affected_row_estimate is not None and affected_row_estimate < limit_cnt:
+            console.print(f"  [bold white]Estimated affected:[/bold white] ~{affected_row_estimate} rows [dim](capped by maximum of {limit_cnt})[/dim]")
+    else:
+        crit = draft.selection_criteria or "Filtered by WHERE criteria"
+        console.print(f"  [bold white]Selection:[/bold white] {crit} · [yellow]All matching rows may be modified[/yellow]")
+        if affected_row_estimate is not None:
+            console.print(f"  [bold white]Estimated affected:[/bold white] ~{affected_row_estimate} rows [dim](pre-execution estimate, not guaranteed)[/dim]")
+        console.print("  [bold white]Guaranteed maximum:[/bold white] [yellow]None (uncapped by row limit)[/yellow]")
+
+    # 4. Single SQL block
+    console.print()
+    console.print("[bold white]SQL:[/bold white]")
+    syntax = Syntax(draft.sql.strip(), lexer="sql", theme="monokai", line_numbers=False, word_wrap=True)
+    console.print(syntax)
+    console.print()
+
+
 def display_execution_preview(
     draft: QueryDraft,
     profile_name: str,
     dialect_name: str,
     config: "ExecutionConfig",
+    affected_row_estimate: Optional[int] = None,
 ) -> None:
-    """Render preview panel with safeguards, limits, and SQL to be approved before execution."""
+    """Render preview panel before execution approval."""
+    if not draft.is_readonly:
+        display_mutation_preview(
+            draft=draft,
+            profile_name=profile_name,
+            dialect_name=dialect_name,
+            affected_row_estimate=affected_row_estimate,
+        )
+        return
+
     console.print()
-    console.print(f"[bold cyan]Execute Read-Only Query Draft[/bold cyan] · [dim]{profile_name} ({dialect_name})[/dim]")
-    console.print("[dim]------------------------------------------------------------[/dim]")
-    console.print(f"  [bold white]Database:[/bold white]   {profile_name} ({dialect_name})")
-    console.print(f"  [bold white]Validation:[/bold white] [green]{draft.validation_status}[/green]")
-    console.print(f"  [bold white]Schema:[/bold white]     [green]{draft.schema_status}[/green]")
-    timeout_str = format_timeout(config.timeout_seconds)
-    console.print(f"  [bold white]Limits:[/bold white]     Max {config.max_rows} rows · Timeout: {timeout_str}")
-    console.print()
-    console.print("[bold white]SQL to be executed:[/bold white]")
-    syntax = Syntax(draft.sql, lexer="sql", theme="monokai", line_numbers=False, word_wrap=True)
+    active_db = profile_name or "active database"
+    dialect_str = f" ({dialect_name})" if dialect_name and dialect_name != active_db else ""
+    console.print(f"[bold white]Execute read-only query on {active_db}{dialect_str}?[/bold white]\n")
+    console.print("[bold white]SQL:[/bold white]")
+    syntax = Syntax(draft.sql.strip(), lexer="sql", theme="monokai", line_numbers=False, word_wrap=True)
     console.print(syntax)
-    console.print("[dim]------------------------------------------------------------[/dim]")
+    console.print()
+
 
 
 def _format_cell_value(val: Any, max_len: int = 40) -> str:

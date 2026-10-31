@@ -18,6 +18,16 @@ class ChatMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class PendingClarification:
+    """Represents an active clarification request awaiting user input."""
+
+    original_question: str
+    clarification_question: str
+    database_name: Optional[str] = None
+    clarifications_history: list[tuple[str, str]] = field(default_factory=list)
+
+
 class WorkspaceSessionState:
     """Encapsulates in-memory session state for an interactive workspace session."""
 
@@ -48,6 +58,7 @@ class WorkspaceSessionState:
         self.last_query_result: Optional[Any] = None
         self.last_inspection_plan: Optional[Any] = None
         self.pending_mutation: Optional[Any] = None
+        self.pending_clarification: Optional[PendingClarification] = None
         self.last_performance_metrics: Optional[Any] = None
 
         self.history: list[ChatMessage] = []
@@ -97,6 +108,7 @@ class WorkspaceSessionState:
         self.last_query_result = None
         self.last_inspection_plan = None
         self.pending_mutation = None
+        self.pending_clarification = None
         self.notify_status_changed()
 
     def set_database_status(

@@ -546,18 +546,17 @@ def test_display_query_draft_renders_all_distinct_claims():
         display_query_draft(draft, db_name="athena", dialect_name="postgres")
 
         output = test_console.file.getvalue()
-        assert "Query ready · Schema verified" in output
-        assert "Draft SQL" in output
-        assert "SELECT id, username FROM users LIMIT 5;" in output
-        assert "Explanation: Lists 5 users." in output
-        assert "Database: athena (postgres)" in output
-        assert "Read-only: Enforced" in output
-        assert "Max 100 rows" in output
-        assert "Timeout: 10 s" in output
-        # Verify routine noise was removed from draft view
+        # Verify routine noise and internal validation stages were removed from draft view
+        assert "Query ready · Schema verified" not in output
+        assert "Draft ready" not in output
         assert "Parsing:    Successful" not in output
         assert "Validation: Passed" not in output
         assert "Schema Context: Relevant subset" not in output
+        assert "Timeout: 10 s" not in output
+        # Concise query preview is displayed
+        assert "SQL:" in output
+        assert "SELECT id, username FROM users LIMIT 5;" in output
+        assert "Lists 5 users." in output
 
     details_console = Console(file=StringIO(), color_system=None)
     with patch("support.query.display.console", details_console):

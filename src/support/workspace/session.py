@@ -141,6 +141,13 @@ def run_workspace_session(
                 tracker.start_stage("request_processing")
 
                 try:
+                    # 0. Check for cancellation of pending clarification
+                    if getattr(state, "pending_clarification", None) and cleaned.lower() in ("cancel", "never mind", "nevermind", "stop", "abort"):
+                        state.pending_clarification = None
+                        console.print("\n[dim]Clarification cancelled. Pending request discarded.[/dim]\n")
+                        state.add_message("assistant", "Clarification cancelled.")
+                        continue
+
                     # 1. Resume pending conversational mutation if active
                     if state.pending_mutation:
                         from support.tools.executor import resume_pending_mutation
@@ -154,34 +161,36 @@ def run_workspace_session(
                             continue
 
                     # 2. Check for deterministic tool operations (diagram, inspection, table listing)
-                    from support.tools.selector import select_tool_for_user_request
-                    from support.tools.executor import execute_database_tool
+                    # When a clarification is pending, route directly to QueryGenerator
+                    if not getattr(state, "pending_clarification", None):
+                        from support.tools.selector import select_tool_for_user_request
+                        from support.tools.executor import execute_database_tool
 
-                    tracker.start_stage("tool_selection")
-                    try:
-                        # Avoid redundant LLM call for tool selection; ordinary database requests
-                        # proceed directly to QueryGenerator, while deterministic tools (diagram, inspection,
-                        # schema listing) are detected without model overhead.
-                        tool_call = select_tool_for_user_request(
-                            message=cleaned,
-                            schema=state.cached_schema,
-                            profile=state.database_profile,
-                            state=state,
-                            llm_service=None,
-                        )
-                    finally:
-                        tracker.end_stage("tool_selection")
+                        tracker.start_stage("tool_selection")
+                        try:
+                            # Avoid redundant LLM call for tool selection; ordinary database requests
+                            # proceed directly to QueryGenerator, while deterministic tools (diagram, inspection,
+                            # schema listing) are detected without model overhead.
+                            tool_call = select_tool_for_user_request(
+                                message=cleaned,
+                                schema=state.cached_schema,
+                                profile=state.database_profile,
+                                state=state,
+                                llm_service=None,
+                            )
+                        finally:
+                            tracker.end_stage("tool_selection")
 
-                    if tool_call.tool in ("inspect_tables", "generate_diagram", "list_tables"):
-                        execute_database_tool(
-                            call=tool_call,
-                            state=state,
-                            db_service=dbs,
-                            llm_service=llms,
-                            user_input_func=sub_input_func,
-                            original_question=cleaned,
-                        )
-                        continue
+                        if tool_call.tool in ("inspect_tables", "generate_diagram", "list_tables"):
+                            execute_database_tool(
+                                call=tool_call,
+                                state=state,
+                                db_service=dbs,
+                                llm_service=llms,
+                                user_input_func=sub_input_func,
+                                original_question=cleaned,
+                            )
+                            continue
 
                     # 3. For all database requests (SELECT, CREATE, ALTER, INSERT, UPDATE, DELETE),
                     # directly ask the LLM to generate the SQL operation with a single loading indicator
@@ -192,11 +201,34 @@ def run_workspace_session(
                     generator = QueryGenerator(db_service=dbs, llm_service=llms)
                     draft = generator.generate_draft(cleaned, state)
 
-                    display_query_draft(
-                        draft,
-                        db_name=state.active_database,
-                        dialect_name=state.database_profile.dialect.value if state.database_profile else None,
-                    )
+                    # Handle clarification response: never enter SQL validation or execution pipeline
+                    if getattr(draft, "is_clarification", False):
+                        console.print()
+                        console.print(f"[bold cyan]{draft.clarification}[/bold cyan]")
+                        console.print()
+
+                        from support.workspace.state import PendingClarification
+                        if state.pending_clarification:
+                            state.pending_clarification.clarifications_history.append(
+                                (state.pending_clarification.clarification_question, cleaned)
+                            )
+                            state.pending_clarification.clarification_question = draft.clarification
+                        else:
+                            state.pending_clarification = PendingClarification(
+                                original_question=cleaned,
+                                clarification_question=draft.clarification,
+                                database_name=state.active_database,
+                            )
+                        state.add_message(
+                            "assistant",
+                            draft.clarification,
+                            metadata={"clarification": draft.clarification},
+                        )
+                        continue
+
+                    # If SQL draft was successfully produced, clear any pending clarification
+                    if draft.sql and getattr(state, "pending_clarification", None):
+                        state.pending_clarification = None
 
                     state.last_query_draft = draft
                     state.add_message(
@@ -223,6 +255,15 @@ def run_workspace_session(
                         except Exception:
                             pass
 
+                        # For read-only queries, display single SQL preview before execution prompt
+                        if draft.is_readonly:
+                            display_query_draft(
+                                draft,
+                                db_name=state.active_database,
+                                dialect_name=state.database_profile.dialect.value if state.database_profile else None,
+                            )
+
+                        # Conversational execution handles unified mutation preview or read-only execution prompt
                         handle_conversational_execution(
                             draft=draft,
                             state=state,
@@ -230,6 +271,13 @@ def run_workspace_session(
                             llm_service=llms,
                             user_input_func=sub_input_func,
                             view_mode="table",
+                        )
+                    else:
+                        # Validation failed or unknown tables: render concise rejection and suggestion
+                        display_query_draft(
+                            draft,
+                            db_name=state.active_database,
+                            dialect_name=state.database_profile.dialect.value if state.database_profile else None,
                         )
                 finally:
                     tracker.end_stage("request_processing")

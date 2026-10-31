@@ -216,12 +216,13 @@ def _handle_history_use(
 
     state.last_query_draft = restored_draft
 
-    # Display draft preview
-    display_query_draft(
-        restored_draft,
-        db_name=state.active_database,
-        dialect_name=active_dialect,
-    )
+    # Display draft preview for read-only or invalid drafts
+    if restored_draft.is_readonly or not restored_draft.is_validated:
+        display_query_draft(
+            restored_draft,
+            db_name=state.active_database,
+            dialect_name=active_dialect,
+        )
 
     if not restored_draft.is_validated or restored_draft.is_schema_verified is False or restored_draft.unknown_tables:
         console.print("[yellow]Restored query failed current schema validation. Draft retained for review.[/yellow]\n")

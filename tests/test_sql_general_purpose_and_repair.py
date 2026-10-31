@@ -292,14 +292,21 @@ def test_unsupported_or_invalid_sql_handled_safely(test_schema):
     assert not val1.is_valid
     assert "syntax error" in val1.status_message.lower()
 
-    # Mutation without WHERE clause
-    val2 = validate_sql_query("DELETE FROM users;", dialect="postgres", schema=test_schema, allow_mutations=True)
+    # Mutation rejected when allow_mutations=False
+    val2 = validate_sql_query("DELETE FROM users;", dialect="postgres", schema=test_schema, allow_mutations=False)
     assert not val2.is_valid
-    assert "without where clause" in val2.status_message.lower()
+    assert "only read-only select queries are permitted" in val2.status_message.lower()
 
-    val3 = validate_sql_query("UPDATE users SET status = 'all';", dialect="postgres", schema=test_schema, allow_mutations=True)
+    # Direct LIMIT on DELETE rejected in PostgreSQL
+    val3 = validate_sql_query("DELETE FROM users LIMIT 5;", dialect="postgres", schema=test_schema, allow_mutations=True)
     assert not val3.is_valid
-    assert "without where clause" in val3.status_message.lower()
+    assert "direct limit clause on delete is not supported in postgresql" in val3.status_message.lower()
+
+    # Scope-aware: Unconditional DELETE allowed when allow_mutations=True as FULL_TABLE scope
+    val4 = validate_sql_query("DELETE FROM users;", dialect="postgres", schema=test_schema, allow_mutations=True)
+    assert val4.is_valid is True
+    assert val4.mutation_scope == "FULL_TABLE"
+    assert val4.is_unrestricted is True
 
 
 # ---------------------------------------------------------------------------

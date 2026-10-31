@@ -320,3 +320,25 @@ def test_run_command_blocks_sensitive_projections_at_execution_time(sensitive_us
     executed = handle_run_command(state=state, executor=mock_executor, user_input_func=lambda _: "yes")
     assert executed is False
     mock_executor.execute.assert_not_called()
+
+
+def test_delete_and_update_with_subquery_validation(sensitive_users_schema):
+    """Verify DELETE and UPDATE statements with subqueries in WHERE clause validate without AttributeError."""
+    del_sql = "DELETE FROM users WHERE id IN (SELECT id FROM users LIMIT 5)"
+    res_del = validate_sql_query(del_sql, dialect="postgres", schema=sensitive_users_schema, allow_mutations=True)
+    assert res_del.is_valid is True
+    assert res_del.operation == "DELETE"
+
+    upd_sql = "UPDATE users SET email = 'test@example.com' WHERE id IN (SELECT id FROM users LIMIT 5)"
+    res_upd = validate_sql_query(upd_sql, dialect="postgres", schema=sensitive_users_schema, allow_mutations=True)
+    assert res_upd.is_valid is True
+    assert res_upd.operation == "UPDATE"
+
+
+def test_dml_returning_sensitive_column_rejected(sensitive_users_schema):
+    """Verify DML statements with RETURNING clauses projecting sensitive fields are rejected."""
+    del_sens = "DELETE FROM users WHERE id = 1 RETURNING password_hash"
+    res = validate_sql_query(del_sens, dialect="postgres", schema=sensitive_users_schema, allow_mutations=True)
+    assert res.is_valid is False
+    assert "password_hash" in res.status_message
+
