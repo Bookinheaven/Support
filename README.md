@@ -329,35 +329,35 @@ Support coordinates intent routing, schema isolation, AST validation, and driver
 
 ```mermaid
 flowchart TD
-    User([User Natural Language Input]) --> IntentRouter{Intent Classifier}
+    User(["User Natural Language Input"]) --> IntentRouter{"Intent Classifier"}
 
     %% Intent Routing
-    IntentRouter -->|Slash Command| SlashDispatcher[REPL Slash Command Dispatcher]
-    IntentRouter -->|Conversational CRUD / DDL| ToolExecutor[Transactional Mutation Engine]
-    IntentRouter -->|Data Query / Exploration| SchemaRanker[Conservative Schema Selector]
+    IntentRouter -->|Slash Command| SlashDispatcher["REPL Slash Command Dispatcher"]
+    IntentRouter -->|Conversational CRUD / DDL| ToolExecutor["Transactional Mutation Engine"]
+    IntentRouter -->|Data Query / Exploration| SchemaRanker["Conservative Schema Selector"]
 
     %% Query Pipeline
-    SchemaRanker -->|Top-K Scored Tables + FK Graph| PromptBuilder[Prompt Context Assembly]
-    PromptBuilder --> LLMGateway[LLM Gateway: Ollama / Gemini / Grok]
-    LLMGateway --> ResponseType{Model Response Type}
-    ResponseType -->|Ambiguous Request| ClarificationPrompt[Clarification Question Prompted to User]
+    SchemaRanker -->|Top-K Scored Tables + FK Graph| PromptBuilder["Prompt Context Assembly"]
+    PromptBuilder --> LLMGateway["LLM Gateway: Ollama / Gemini / Grok"]
+    LLMGateway --> ResponseType{"Model Response Type"}
+    ResponseType -->|Ambiguous Request| ClarificationPrompt["Clarification Question Prompted to User"]
     ClarificationPrompt -.->|User Response Resumes Request| PromptBuilder
-    ResponseType -->|Concrete Query| RawSQL[Generated SQL Draft]
+    ResponseType -->|Concrete Query| RawSQL["Generated SQL Draft"]
 
     %% Validation & Security
-    RawSQL --> ASTValidator{SQLGlot AST Validator}
-    ASTValidator -->|Invalid Syntax / Injection Detected| RepairLoop[Auto-Repair Feedback Loop]
-    ASTValidator -->|Sensitive Columns Projected| PrivacyGuard[Wildcard Projection & Redaction]
-    PrivacyGuard --> UserConfirm{Interactive Approval [y/N]}
+    RawSQL --> ASTValidator{"SQLGlot AST Validator"}
+    ASTValidator -->|Invalid Syntax / Injection Detected| RepairLoop["Auto-Repair Feedback Loop"]
+    ASTValidator -->|Sensitive Columns Projected| PrivacyGuard["Wildcard Projection & Redaction"]
+    PrivacyGuard --> UserConfirm{"Interactive Approval [y/N]"}
 
     %% Execution
-    UserConfirm -->|Declined| Cancelled([Operation Aborted])
-    UserConfirm -->|Approved| DriverExecutor[Driver-Enforced Read-Only Executor]
+    UserConfirm -->|Declined| Cancelled(["Operation Aborted"])
+    UserConfirm -->|Approved| DriverExecutor["Driver-Enforced Read-Only Executor"]
     DriverExecutor -->|Execution Error| RepairLoop
     RepairLoop --> PromptBuilder
-    DriverExecutor -->|Success| Formatter[Adaptive Rich Table / Record Cards]
-    Formatter --> HistoryStore[(SQLite History Store)]
-    Formatter --> Terminal([Rendered to Terminal])
+    DriverExecutor -->|Success| Formatter["Adaptive Rich Table / Record Cards"]
+    Formatter --> HistoryStore[("SQLite History Store")]
+    Formatter --> Terminal(["Rendered to Terminal"])
 ```
 
 ---
