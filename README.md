@@ -13,6 +13,10 @@
 
 <br/>
 
+<p align="center">
+  <img src="assets/hero.png" alt="Support - Talk to Your Databases in Plain English" width="100%" />
+</p>
+
 [Overview](#overview) •
 [Installation Guide](#installation--setup-guide) •
 [Interactive REPL](#interactive-terminal-workspace) •
@@ -43,6 +47,10 @@ Unlike simple Text-to-SQL scripts that blindly execute hallucinated queries, **S
 ---
 
 ## Interactive Terminal Workspace
+
+<p align="center">
+  <img src="assets/demo.png" alt="Support Interactive Workspace Query Demo" width="100%" />
+</p>
 
 Launch `support` without arguments to enter the interactive REPL. Experience live status monitoring, automated syntax highlighting, schema introspection, and interactive execution approvals:
 
