@@ -1,7 +1,3 @@
-"""Support: A modular, extensible, multi-database natural-language-to-SQL application."""
+"""Support: A developer-first, terminal-native database workspace."""
 
-from support.__version__ import __version__
-from support.core.dialect import Dialect
-from support.schema.models import DatabaseSchema, TableSchema, ColumnSchema
-
-__all__ = ["__version__", "Dialect", "DatabaseSchema", "TableSchema", "ColumnSchema"]
+__version__ = "0.1.0"
