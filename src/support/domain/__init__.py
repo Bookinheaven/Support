@@ -1,1 +1,0 @@
-"""Domain layer root package."""
