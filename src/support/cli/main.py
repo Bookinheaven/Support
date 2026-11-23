@@ -5,6 +5,7 @@ import sys
 import typer
 
 from support import __version__
+from support.cli.profile import profile_app
 
 APP_NAME = "support"
 
@@ -14,6 +15,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
 )
+app.add_typer(profile_app, name="profile")
 
 
 def version_callback(value: bool) -> None:

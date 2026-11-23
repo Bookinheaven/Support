@@ -13,6 +13,10 @@ authors = [
 ]
 dependencies = [
     "typer>=0.15.0",
+    "platformdirs>=4.0.0",
+    "keyring>=24.0.0",
+    "psycopg[binary]>=3.2,<4",
+    "PyMySQL[rsa]>=1.2.4,<2",
 ]
 
 [project.optional-dependencies]
