@@ -18,26 +18,7 @@ from support.infrastructure.keyring_credentials import (
     APPROVED_BACKENDS,
     KeyringCredentialStore,
 )
-
-
-class FakeKeyringBackend(keyring.backend.KeyringBackend):
-    """Deterministic in-memory keyring backend for tests."""
-
-    priority = 1
-
-    def __init__(self) -> None:
-        self.passwords: dict[tuple[str, str], str] = {}
-
-    def set_password(self, service: str, username: str, password: str) -> None:
-        self.passwords[(service, username)] = password
-
-    def get_password(self, service: str, username: str) -> str | None:
-        return self.passwords.get((service, username))
-
-    def delete_password(self, service: str, username: str) -> None:
-        if (service, username) not in self.passwords:
-            raise keyring.errors.PasswordDeleteError("Password not found")
-        del self.passwords[(service, username)]
+from tests.conftest import FakeKeyringBackend
 
 
 class BrokenKeyringBackend(keyring.backend.KeyringBackend):
@@ -60,13 +41,13 @@ def test_set_and_retrieve_credential() -> None:
     store = KeyringCredentialStore(backend=backend, allow_test_backend=True)
     profile_id = uuid4()
 
-    assert store.get(profile_id) is None
-    assert not store.contains(profile_id)
+    assert store.get_password(profile_id) is None
+    assert not store.has_password(profile_id)
 
-    store.set(profile_id, "my-secret-password")
+    store.store_password(profile_id, "my-secret-password")
 
-    assert store.get(profile_id) == "my-secret-password"
-    assert store.contains(profile_id)
+    assert store.get_password(profile_id) == "my-secret-password"
+    assert store.has_password(profile_id)
 
 
 def test_missing_credential_returns_none() -> None:
@@ -74,8 +55,8 @@ def test_missing_credential_returns_none() -> None:
     store = KeyringCredentialStore(backend=backend, allow_test_backend=True)
     non_existent_id = uuid4()
 
-    assert store.get(non_existent_id) is None
-    assert not store.contains(non_existent_id)
+    assert store.get_password(non_existent_id) is None
+    assert not store.has_password(non_existent_id)
 
 
 def test_delete_and_idempotent_delete() -> None:
@@ -83,35 +64,35 @@ def test_delete_and_idempotent_delete() -> None:
     store = KeyringCredentialStore(backend=backend, allow_test_backend=True)
     profile_id = uuid4()
 
-    store.set(profile_id, "temporary-secret")
-    assert store.contains(profile_id)
+    store.store_password(profile_id, "temporary-secret")
+    assert store.has_password(profile_id)
 
     # First delete
-    store.delete(profile_id)
-    assert not store.contains(profile_id)
-    assert store.get(profile_id) is None
+    store.delete_password(profile_id)
+    assert not store.has_password(profile_id)
+    assert store.get_password(profile_id) is None
 
     # Second delete (idempotent: must not raise error)
-    store.delete(profile_id)
-    assert not store.contains(profile_id)
+    store.delete_password(profile_id)
+    assert not store.has_password(profile_id)
 
 
 def test_rejection_of_unapproved_backends() -> None:
     # 1. Null backend must be rejected
     null_store = KeyringCredentialStore(backend=null.Keyring())
     with pytest.raises(CredentialStoreUnavailableError, match="not an approved native secure"):
-        null_store.set(uuid4(), "secret")
+        null_store.store_password(uuid4(), "secret")
 
     # 2. Fail backend must be rejected
     fail_store = KeyringCredentialStore(backend=fail.Keyring())
     with pytest.raises(CredentialStoreUnavailableError, match="not an approved native secure"):
-        fail_store.get(uuid4())
+        fail_store.get_password(uuid4())
 
     # 3. Arbitrary custom/third-party backend without allow_test_backend must be rejected
     custom_backend = FakeKeyringBackend()
     custom_store = KeyringCredentialStore(backend=custom_backend, allow_test_backend=False)
     with pytest.raises(CredentialStoreUnavailableError, match="not an approved native secure"):
-        custom_store.delete(uuid4())
+        custom_store.delete_password(uuid4())
 
 
 def test_backend_failure_handling() -> None:
@@ -120,13 +101,13 @@ def test_backend_failure_handling() -> None:
     profile_id = uuid4()
 
     with pytest.raises(CredentialStorageError, match="Failed to store credential"):
-        store.set(profile_id, "password")
+        store.store_password(profile_id, "password")
 
     with pytest.raises(CredentialRetrievalError, match="Failed to retrieve credential"):
-        store.get(profile_id)
+        store.get_password(profile_id)
 
     with pytest.raises(CredentialDeletionError, match="Failed to delete credential"):
-        store.delete(profile_id)
+        store.delete_password(profile_id)
 
 
 def test_allowlist_structure() -> None:

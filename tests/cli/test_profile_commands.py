@@ -186,3 +186,114 @@ def test_profile_cli_multi_database_types(tmp_path: Path) -> None:
     )
     assert res.exit_code == 1
     assert "does not support passwords" in res.output
+
+    # Add MongoDB profile with URI and username
+    res = runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--name",
+            "my-mongo",
+            "--type",
+            "mongodb",
+            "--uri",
+            "mongodb://localhost:27017/shop",
+            "--username",
+            "mongouser",
+        ],
+        env=env,
+    )
+    assert res.exit_code == 0
+    assert "Profile 'my-mongo' added successfully." in res.output
+
+    # Add MongoDB profile with SRV URI
+    res = runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--name",
+            "mongo-srv",
+            "--type",
+            "mongodb",
+            "--uri",
+            "mongodb+srv://cluster.example.net/analytics",
+        ],
+        env=env,
+    )
+    assert res.exit_code == 0
+    assert "Profile 'mongo-srv' added successfully." in res.output
+
+    # Reject embedded credentials in URI
+    res = runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--name",
+            "bad-mongo",
+            "--type",
+            "mongodb",
+            "--uri",
+            "mongodb://admin:secret@localhost:27017/db",
+        ],
+        env=env,
+    )
+    assert res.exit_code == 1
+    assert "embedded credentials" in res.output
+
+    # Show MongoDB profile
+    res = runner.invoke(app, ["profile", "show", "my-mongo"], env=env)
+    assert res.exit_code == 0
+    assert "Type:        mongodb" in res.output
+    assert "URI:         mongodb://localhost:27017/shop" in res.output
+    assert "Database:    shop" in res.output
+    assert "Auth Source: shop" in res.output
+    assert "Username:    mongouser" in res.output
+
+    # Password set on MongoDB profile without username fails
+    res = runner.invoke(
+        app,
+        ["profile", "password", "set", "mongo-srv"],
+        env=env,
+    )
+    assert res.exit_code == 1
+    assert "does not have a username configured" in res.output
+
+    # Password set on MongoDB profile with username succeeds
+    res = runner.invoke(
+        app,
+        ["profile", "password", "set", "my-mongo"],
+        input="mongopass\nmongopass\n",
+        env=env,
+    )
+    assert res.exit_code == 0
+    assert "Password for profile 'my-mongo' stored securely." in res.output
+
+
+def test_profile_remove_credential_deletion_error_handled_cleanly(tmp_path: Path) -> None:
+    from unittest.mock import patch
+    from support.application.errors import CredentialDeletionError
+
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    res = runner.invoke(
+        app,
+        ["profile", "add", "--name", "remove-fail", "--database", "db1", "--username", "u1", "--ssl-mode", "prefer"],
+        env=env,
+    )
+    assert res.exit_code == 0
+
+    with patch(
+        "support.infrastructure.keyring_credentials.KeyringCredentialStore.delete_password",
+        side_effect=CredentialDeletionError("Permission denied deleting secret from native store"),
+    ):
+        del_res = runner.invoke(app, ["profile", "remove", "remove-fail", "--yes"], env=env)
+        assert del_res.exit_code == 1
+        assert "Error: Permission denied deleting secret from native store" in del_res.output
+        assert "Traceback" not in del_res.output
+
+    # Profile must NOT have been deleted from SQLite (no orphaned credential state)
+    show_res = runner.invoke(app, ["profile", "show", "remove-fail"], env=env)
+    assert show_res.exit_code == 0
+    assert "Profile: remove-fail" in show_res.output

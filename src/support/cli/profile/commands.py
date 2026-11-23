@@ -1,22 +1,9 @@
-"""Profile management CLI commands for Support."""
+"""Profile CRUD commands."""
 
-import sys
-from pathlib import Path
 import typer
 
-from support.application.connection import ConnectionTestWorkflow
-from support.application.errors import (
-    AuthenticationFailedError,
-    ConnectionError,
-    CredentialError,
-    CredentialStoreUnavailableError,
-    ProfileAlreadyExistsError,
-    ProfileError,
-    ProfileNotFoundError,
-    ProfileStorageError,
-)
-from support.application.ports import CredentialStore, DatabaseConnector
-from support.application.service import ProfileService
+from support.application.errors import CredentialError, ProfileError
+from support.cli.composition import get_profile_service
 from support.domain.profiles import (
     DatabaseType,
     MariaDBConnection,
@@ -27,47 +14,8 @@ from support.domain.profiles import (
     SQLiteConnection,
     SQLServerConnection,
 )
-from support.infrastructure.dispatcher import ConnectorDispatcher
-from support.infrastructure.keyring_credentials import KeyringCredentialStore
-from support.infrastructure.sqlite_profiles import SQLiteProfileRepository
-
-profile_app = typer.Typer(
-    name="profile",
-    help="Manage database connection profiles.",
-    no_args_is_help=True,
-)
-password_app = typer.Typer(
-    name="password",
-    help="Manage stored database profile passwords.",
-    no_args_is_help=True,
-)
-profile_app.add_typer(password_app, name="password")
 
 
-def _get_service(credential_store: CredentialStore | None = None) -> ProfileService:
-    repository = SQLiteProfileRepository()
-    if credential_store is None:
-        credential_store = KeyringCredentialStore()
-    return ProfileService(repository=repository, credential_store=credential_store)
-
-
-def _get_connection_workflow(
-    connector: DatabaseConnector | None = None,
-    credential_store: CredentialStore | None = None,
-) -> ConnectionTestWorkflow:
-    repository = SQLiteProfileRepository()
-    if connector is None:
-        connector = ConnectorDispatcher()
-    if credential_store is None:
-        credential_store = KeyringCredentialStore()
-    return ConnectionTestWorkflow(
-        repository=repository,
-        connector=connector,
-        credential_store=credential_store,
-    )
-
-
-@profile_app.command(name="add", help="Add a new database profile.")
 def add_profile(
     name: str = typer.Option(
         ...,
@@ -94,6 +42,11 @@ def add_profile(
         "--database-path",
         help="File system path to SQLite database (for sqlite).",
     ),
+    uri: str | None = typer.Option(
+        None,
+        "--uri",
+        help="Connection URI (for mongodb, e.g. mongodb://localhost:27017 or mongodb+srv://cluster.mongodb.net/dbname).",
+    ),
     auth_source: str = typer.Option("admin", "--auth-source", help="MongoDB auth source (default: admin)."),
     tls: bool = typer.Option(False, "--tls", help="Enable TLS (for mongodb)."),
     encrypt: bool = typer.Option(True, "--encrypt", help="Enable encryption (for sqlserver)."),
@@ -102,7 +55,7 @@ def add_profile(
     ),
 ) -> None:
     """Add a new database profile."""
-    service = _get_service()
+    service = get_profile_service()
     try:
         db_type_str = type.strip().lower()
         try:
@@ -172,15 +125,22 @@ def add_profile(
                 trust_server_certificate=trust_server_certificate,
             )
         elif db_type == DatabaseType.MONGODB:
-            if database is None:
-                raise ProfileValidationError("--database is required for mongodb profiles.")
+            resolved_uri = uri
+            if not resolved_uri:
+                resolved_port = port if port is not None else 27017
+                resolved_db = database or "admin"
+                query_params = []
+                if tls:
+                    query_params.append("tls=true")
+                if auth_source and auth_source != "admin":
+                    query_params.append(f"authSource={auth_source}")
+                query_str = f"?{'&'.join(query_params)}" if query_params else ""
+                resolved_uri = f"mongodb://{host}:{resolved_port}/{resolved_db}{query_str}"
+
             connection = MongoDBConnection(
-                database=database,
+                database=database or "admin",
+                uri=resolved_uri,
                 username=username,
-                host=host,
-                port=port if port is not None else 27017,
-                auth_source=auth_source,
-                tls=tls,
             )
 
         profile = service.add_profile(name=name, connection=connection)
@@ -190,10 +150,9 @@ def add_profile(
         raise typer.Exit(code=1)
 
 
-@profile_app.command(name="list", help="List all saved database profiles.")
 def list_profiles() -> None:
     """List all saved database profiles."""
-    service = _get_service()
+    service = get_profile_service()
     try:
         profiles = service.list_profiles()
     except ProfileError as exc:
@@ -214,7 +173,7 @@ def list_profiles() -> None:
             db_str = conn.database_path
             user_str = "-"
         elif isinstance(conn, MongoDBConnection):
-            host_str = f"{conn.host}:{conn.port}"
+            host_str = f"{conn.host}:{conn.port}" if conn.port is not None else conn.host
             db_str = conn.database
             user_str = conn.username or "-"
         else:
@@ -235,12 +194,11 @@ def list_profiles() -> None:
         typer.echo(row_line)
 
 
-@profile_app.command(name="show", help="Display details of a saved database profile.")
 def show_profile(
     name: str = typer.Argument(..., help="Name of the profile to display."),
 ) -> None:
     """Display details of a saved database profile."""
-    service = _get_service()
+    service = get_profile_service()
     try:
         profile = service.get_profile(name)
     except ProfileError as exc:
@@ -273,21 +231,18 @@ def show_profile(
         typer.echo(f"  Encrypt:     {conn.encrypt}")
         typer.echo(f"  Trust Cert:  {conn.trust_server_certificate}")
     elif isinstance(conn, MongoDBConnection):
-        typer.echo(f"  Host:        {conn.host}")
-        typer.echo(f"  Port:        {conn.port}")
+        typer.echo(f"  URI:         {conn.uri}")
         typer.echo(f"  Database:    {conn.database}")
-        typer.echo(f"  Username:    {conn.username or '(none)'}")
         typer.echo(f"  Auth Source: {conn.auth_source}")
-        typer.echo(f"  TLS:         {conn.tls}")
+        typer.echo(f"  Username:    {conn.username or '(none)'}")
 
 
-@profile_app.command(name="rename", help="Rename an existing profile preserving its UUID.")
 def rename_profile(
     old_name: str = typer.Argument(..., help="Current profile name."),
     new_name: str = typer.Argument(..., help="New profile name."),
 ) -> None:
     """Rename an existing profile preserving its UUID."""
-    service = _get_service()
+    service = get_profile_service()
     try:
         service.rename_profile(old_name, new_name)
         typer.echo(f"Profile '{old_name}' renamed to '{new_name}'.")
@@ -296,13 +251,12 @@ def rename_profile(
         raise typer.Exit(code=1)
 
 
-@profile_app.command(name="remove", help="Remove a saved database profile.")
 def remove_profile(
     name: str = typer.Argument(..., help="Name of the profile to remove."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm removal without prompting."),
 ) -> None:
     """Remove a saved database profile."""
-    service = _get_service()
+    service = get_profile_service()
     try:
         # Check existence first so user is not prompted for non-existent profile
         service.get_profile(name)
@@ -314,163 +268,6 @@ def remove_profile(
 
         service.remove_profile(name)
         typer.echo(f"Profile '{name}' removed.")
-    except ProfileError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-
-def _is_interactive() -> bool:
-    """Check whether stdin is attached to an interactive terminal."""
-    return sys.stdin.isatty()
-
-
-@profile_app.command(name="test", help="Test database connection for a saved profile.")
-def test_profile(
-    name: str = typer.Argument(..., help="Name of the profile to test."),
-) -> None:
-    """Establish connection, run test query, and report result without exposing credentials."""
-    workflow = _get_connection_workflow()
-    try:
-        profile = workflow.get_profile(name)
-        conn = profile.connection
-
-        password = None
-        used_saved = False
-
-        if conn.database_type != DatabaseType.SQLITE:
-            # 1. Check for saved credential
-            password = workflow.resolve_saved_password(profile.id)
-            used_saved = password is not None
-
-            # 2. If no saved password, prompt for one-time password
-            if not used_saved:
-                if not _is_interactive():
-                    typer.echo(
-                        f"Error: No saved password for profile '{name}' and non-interactive input is not supported.\n"
-                        f"Next step: Store a password using: support profile password set {name}",
-                        err=True,
-                    )
-                    raise typer.Exit(code=1)
-
-                prompt_pw = typer.prompt(
-                    f"Enter password for profile '{name}' (press Enter for none)",
-                    default="",
-                    hide_input=True,
-                    show_default=False,
-                )
-                password = prompt_pw if prompt_pw else None
-
-        # 3. Test connection
-        result = workflow.test_profile_connection(
-            name,
-            password=password,
-            used_saved_password=used_saved,
-        )
-
-        typer.echo("Connection succeeded.")
-        typer.echo(f"  Type:        {result.database_type}")
-        typer.echo(f"  Database:    {result.database}")
-        if result.username:
-            typer.echo(f"  User:        {result.username}")
-        if result.host and result.port:
-            typer.echo(f"  Host:        {result.host}:{result.port}")
-        elif result.host:
-            typer.echo(f"  Host:        {result.host}")
-        if result.ssl_mode:
-            typer.echo(f"  SSL Mode:    {result.ssl_mode}")
-        if result.server_version:
-            if result.database_type == "postgresql":
-                typer.echo(f"  Server:      PostgreSQL {result.server_version}")
-            elif result.database_type == "sqlite":
-                typer.echo(f"  Server:      SQLite {result.server_version}")
-            elif result.database_type == "mysql":
-                typer.echo(f"  Server:      MySQL {result.server_version}")
-            elif result.database_type == "mariadb":
-                typer.echo(f"  Server:      MariaDB {result.server_version}")
-            else:
-                typer.echo(f"  Server:      {result.database_type.capitalize()} {result.server_version}")
-
-    except AuthenticationFailedError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        if exc.used_saved_password:
-            typer.echo(
-                f"Next step: Update the saved password with: support profile password set {name}",
-                err=True,
-            )
-        else:
-            typer.echo(
-                f"Next step: Verify your credentials or save a password with: support profile password set {name}",
-                err=True,
-            )
-        raise typer.Exit(code=1)
-    except (ConnectionError, ProfileError) as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-
-@password_app.command(name="set", help="Securely store a database password for a profile.")
-def set_password(
-    name: str = typer.Argument(..., help="Name of the profile."),
-) -> None:
-    """Prompt for and securely store a database password."""
-    service = _get_service()
-    try:
-        # Check profile existence and type before asking for password
-        profile = service.get_profile(name)
-        if profile.connection.database_type == DatabaseType.SQLITE:
-            typer.echo(f"Error: Profile '{name}' uses SQLite, which does not support passwords.", err=True)
-            raise typer.Exit(code=1)
-
-        password = typer.prompt(
-            f"Enter database password for profile '{name}'",
-            hide_input=True,
-        )
-        confirm = typer.prompt(
-            "Confirm database password",
-            hide_input=True,
-        )
-        if password != confirm:
-            typer.echo("Error: Passwords do not match.", err=True)
-            raise typer.Exit(code=1)
-
-        service.set_profile_password(name, password)
-        typer.echo(f"Password for profile '{name}' stored securely.")
-    except (ProfileValidationError, ProfileError, CredentialError) as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-
-@password_app.command(name="status", help="Check whether a saved password exists for a profile.")
-def password_status(
-    name: str = typer.Argument(..., help="Name of the profile."),
-) -> None:
-    """Report whether a password exists without retrieving or printing it."""
-    service = _get_service()
-    try:
-        profile = service.get_profile(name)
-        if profile.connection.database_type == DatabaseType.SQLITE:
-            typer.echo(f"Profile '{name}': SQLite does not use passwords.")
-            return
-
-        has_pw = service.has_profile_password(name)
-        if has_pw:
-            typer.echo(f"Profile '{name}': Saved password is present.")
-        else:
-            typer.echo(f"Profile '{name}': No saved password.")
-    except (ProfileValidationError, ProfileError, CredentialError) as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-
-@password_app.command(name="remove", help="Remove the saved password for a profile.")
-def remove_password(
-    name: str = typer.Argument(..., help="Name of the profile."),
-) -> None:
-    """Remove the saved password for a profile."""
-    service = _get_service()
-    try:
-        service.remove_profile_password(name)
-        typer.echo(f"Password for profile '{name}' removed.")
-    except (ProfileValidationError, ProfileError, CredentialError) as exc:
+    except (ProfileError, CredentialError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)

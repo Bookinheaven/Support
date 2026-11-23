@@ -71,7 +71,7 @@ class KeyringCredentialStore:
 
         return backend
 
-    def set(self, profile_id: UUID, password: str) -> None:
+    def store_password(self, profile_id: UUID, password: str) -> None:
         """Securely store a password for the given profile ID."""
         backend = self._ensure_backend()
         account = str(profile_id)
@@ -86,7 +86,7 @@ class KeyringCredentialStore:
                 "Unexpected failure storing credential in native secure store."
             ) from exc
 
-    def get(self, profile_id: UUID) -> str | None:
+    def get_password(self, profile_id: UUID) -> str | None:
         """Retrieve the password for the given profile ID, or None if absent."""
         backend = self._ensure_backend()
         account = str(profile_id)
@@ -101,7 +101,7 @@ class KeyringCredentialStore:
                 "Unexpected failure retrieving credential from native secure store."
             ) from exc
 
-    def delete(self, profile_id: UUID) -> None:
+    def delete_password(self, profile_id: UUID) -> None:
         """Delete the password for the given profile ID. Idempotent: absent credentials do not fail."""
         backend = self._ensure_backend()
         account = str(profile_id)
@@ -127,12 +127,6 @@ class KeyringCredentialStore:
                 "Unexpected failure deleting credential from native secure store."
             ) from exc
 
-    def contains(self, profile_id: UUID) -> bool:
+    def has_password(self, profile_id: UUID) -> bool:
         """Check whether a password exists for the given profile ID without revealing it."""
-        return self.get(profile_id) is not None
-
-    # Protocol method aliases
-    store_password = set
-    get_password = get
-    delete_password = delete
-    has_password = contains
+        return self.get_password(profile_id) is not None

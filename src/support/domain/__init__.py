@@ -1,5 +1,11 @@
 """Domain layer for Support."""
 
+from support.domain.assistant import (
+    ChatMessage,
+    ModelInfo,
+    ToolCall,
+    ToolDefinition,
+)
 from support.domain.profiles import (
     ConnectionConfig,
     DatabaseProfile,
@@ -11,27 +17,45 @@ from support.domain.profiles import (
     ProfileValidationError,
     SQLiteConnection,
     SQLServerConnection,
-    SUPPORTED_CONNECTION_TYPES,
-    SUPPORTED_SSL_MODES,
-    POSTGRES_SUPPORTED_SSL_MODES,
-    MYSQL_SUPPORTED_SSL_MODES,
-    MARIADB_SUPPORTED_SSL_MODES,
+    requires_credentials,
+)
+from support.domain.schema import (
+    ColumnMetadata,
+    ConstraintMetadata,
+    DatabaseSchema,
+    ForeignKeyMetadata,
+    IndexMetadata,
+    ReadOnlyDict,
+    TableMetadata,
+    TableType,
+    parse_object_name,
+    unquote_identifier,
 )
 
 __all__ = [
+    "ChatMessage",
+    "ColumnMetadata",
     "ConnectionConfig",
+    "ConstraintMetadata",
     "DatabaseProfile",
+    "DatabaseSchema",
     "DatabaseType",
+    "ForeignKeyMetadata",
+    "IndexMetadata",
     "MariaDBConnection",
+    "ModelInfo",
     "MongoDBConnection",
     "MySQLConnection",
     "PostgresConnection",
     "ProfileValidationError",
+    "ReadOnlyDict",
     "SQLiteConnection",
     "SQLServerConnection",
-    "SUPPORTED_CONNECTION_TYPES",
-    "SUPPORTED_SSL_MODES",
-    "POSTGRES_SUPPORTED_SSL_MODES",
-    "MYSQL_SUPPORTED_SSL_MODES",
-    "MARIADB_SUPPORTED_SSL_MODES",
+    "TableMetadata",
+    "TableType",
+    "ToolCall",
+    "ToolDefinition",
+    "parse_object_name",
+    "requires_credentials",
+    "unquote_identifier",
 ]

@@ -45,7 +45,7 @@ def test_profile_password_cli_full_workflow(tmp_path: Path) -> None:
     )
     assert res.exit_code == 0
 
-    with patch("support.cli.profile.KeyringCredentialStore", return_value=test_cred_store):
+    with patch("support.cli.composition.KeyringCredentialStore", return_value=test_cred_store):
         # 2. Check initial password status (no password)
         res = runner.invoke(app, ["profile", "password", "status", "prod-db"], env=env)
         assert res.exit_code == 0
@@ -106,7 +106,7 @@ def test_profile_password_cli_unavailable_store_handling(tmp_path: Path) -> None
     from keyring.backends import null
     unapproved_store = KeyringCredentialStore(backend=null.Keyring())
 
-    with patch("support.cli.profile.KeyringCredentialStore", return_value=unapproved_store):
+    with patch("support.cli.composition.KeyringCredentialStore", return_value=unapproved_store):
         res = runner.invoke(
             app,
             ["profile", "password", "set", "ci-db"],
@@ -124,7 +124,7 @@ def test_profile_password_cli_nonexistent_profile(tmp_path: Path) -> None:
     backend = FakeKeyringBackend()
     test_cred_store = KeyringCredentialStore(backend=backend, allow_test_backend=True)
 
-    with patch("support.cli.profile.KeyringCredentialStore", return_value=test_cred_store):
+    with patch("support.cli.composition.KeyringCredentialStore", return_value=test_cred_store):
         res = runner.invoke(app, ["profile", "password", "status", "missing-db"], env=env)
         assert res.exit_code == 1
         assert "Error: Profile 'missing-db' not found." in res.output

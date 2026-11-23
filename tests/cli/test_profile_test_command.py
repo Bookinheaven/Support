@@ -7,7 +7,10 @@ from typer.testing import CliRunner
 from support.application.errors import (
     AuthenticationFailedError,
     ConnectionTimeoutError,
+    CredentialError,
+    CredentialRetrievalError,
     DatabaseNotFoundError,
+    GeneralConnectionError,
     HostUnreachableError,
     SSLVerificationError,
 )
@@ -44,7 +47,7 @@ def test_profile_test_with_saved_password_success(tmp_path: Path) -> None:
         server_version="16.2",
     )
 
-    with patch("support.infrastructure.postgres.PostgresConnector.test_connection", return_value=mock_result) as mock_test:
+    with patch("support.infrastructure.dispatcher.ConnectorDispatcher.test_connection", return_value=mock_result) as mock_test:
         # Should connect using saved password WITHOUT prompting
         res = runner.invoke(app, ["profile", "test", "prod-db"], env=env)
         assert res.exit_code == 0
@@ -74,8 +77,8 @@ def test_profile_test_with_one_time_password_prompt(tmp_path: Path) -> None:
     )
 
     one_time_pw = "one_time_secret_value"
-    with patch("support.cli.profile._is_interactive", return_value=True), patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection", return_value=mock_result
+    with patch("support.cli.profile.connection._is_interactive", return_value=True), patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection", return_value=mock_result
     ) as mock_test:
         # Interactive prompt for password
         res = runner.invoke(app, ["profile", "test", "otp-db"], input=f"{one_time_pw}\n", env=env)
@@ -95,7 +98,7 @@ def test_profile_test_non_interactive_without_saved_password_fails(tmp_path: Pat
     env = {"SUPPORT_HOME": str(tmp_path)}
     _add_test_profile(env, "headless-db")
 
-    with patch("support.cli.profile._is_interactive", return_value=False):
+    with patch("support.cli.profile.connection._is_interactive", return_value=False):
         res = runner.invoke(app, ["profile", "test", "headless-db"], env=env)
         assert res.exit_code == 1
         assert "Error: No saved password for profile 'headless-db' and non-interactive input is not supported." in res.output
@@ -108,7 +111,7 @@ def test_profile_test_auth_failure_with_saved_password_suggests_update(tmp_path:
     runner.invoke(app, ["profile", "password", "set", "bad-saved-auth"], input="old_pass\nold_pass\n", env=env)
 
     with patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         side_effect=AuthenticationFailedError("Password authentication failed.", used_saved_password=True),
     ):
         res = runner.invoke(app, ["profile", "test", "bad-saved-auth"], env=env)
@@ -125,7 +128,7 @@ def test_profile_test_connection_failures_output_clear_messages(tmp_path: Path) 
 
     # 1. Connection refused / Host unreachable
     with patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         side_effect=HostUnreachableError("Connection refused by 'localhost:5432'."),
     ):
         res = runner.invoke(app, ["profile", "test", "err-db"], env=env)
@@ -135,7 +138,7 @@ def test_profile_test_connection_failures_output_clear_messages(tmp_path: Path) 
 
     # 2. Connection timeout
     with patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         side_effect=ConnectionTimeoutError("Connection timed out after 10 seconds."),
     ):
         res = runner.invoke(app, ["profile", "test", "err-db"], env=env)
@@ -145,7 +148,7 @@ def test_profile_test_connection_failures_output_clear_messages(tmp_path: Path) 
 
     # 3. Database not found
     with patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         side_effect=DatabaseNotFoundError("Database 'myapp' does not exist."),
     ):
         res = runner.invoke(app, ["profile", "test", "err-db"], env=env)
@@ -154,7 +157,7 @@ def test_profile_test_connection_failures_output_clear_messages(tmp_path: Path) 
 
     # 4. SSL verification error
     with patch(
-        "support.infrastructure.postgres.PostgresConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         side_effect=SSLVerificationError("SSL/TLS verification failed."),
     ):
         res = runner.invoke(app, ["profile", "test", "err-db"], env=env)
@@ -294,7 +297,7 @@ def test_profile_test_mysql_with_saved_password_success(tmp_path: Path) -> None:
     )
 
     with patch(
-        "support.infrastructure.mysql_connector.MySQLCompatibleConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         return_value=mock_result,
     ) as mock_test:
         res = runner.invoke(app, ["profile", "test", "prod-mysql"], env=env)
@@ -332,7 +335,7 @@ def test_profile_test_mariadb_with_saved_password_success(tmp_path: Path) -> Non
     )
 
     with patch(
-        "support.infrastructure.mysql_connector.MySQLCompatibleConnector.test_connection",
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
         return_value=mock_result,
     ) as mock_test:
         res = runner.invoke(app, ["profile", "test", "prod-maria"], env=env)
@@ -344,6 +347,267 @@ def test_profile_test_mariadb_with_saved_password_success(tmp_path: Path) -> Non
         assert "mariapass" not in res.output
         mock_test.assert_called_once()
         assert mock_test.call_args.kwargs["password"] == "mariapass"
+
+
+def test_profile_test_sqlserver_with_saved_password_success(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    res_add = runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--type",
+            "sqlserver",
+            "--name",
+            "prod-sqlserver",
+            "--database",
+            "sales",
+            "--username",
+            "sa",
+        ],
+        env=env,
+    )
+    assert res_add.exit_code == 0
+
+    runner.invoke(app, ["profile", "password", "set", "prod-sqlserver"], input="sqlpass\nsqlpass\n", env=env)
+
+    mock_result = ConnectionTestResult(
+        success=True,
+        database_type="sqlserver",
+        database="sales",
+        username="sa",
+        host="localhost",
+        port=1433,
+    )
+
+    with patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
+        return_value=mock_result,
+    ) as mock_test:
+        res = runner.invoke(app, ["profile", "test", "prod-sqlserver"], env=env)
+        assert res.exit_code == 0
+        assert "Connection succeeded." in res.output
+        assert "Type:        sqlserver" in res.output
+        assert "Database:    sales" in res.output
+        assert "User:        sa" in res.output
+        assert "Host:        localhost:1433" in res.output
+        assert "sqlpass" not in res.output
+        mock_test.assert_called_once()
+        assert mock_test.call_args.kwargs["password"] == "sqlpass"
+
+
+def test_profile_test_sqlserver_database_access_denied_no_password_remediation(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--type",
+            "sqlserver",
+            "--name",
+            "restricted-sql",
+            "--database",
+            "secret_db",
+            "--username",
+            "app_user",
+        ],
+        env=env,
+    )
+    runner.invoke(app, ["profile", "password", "set", "restricted-sql"], input="pass123\npass123\n", env=env)
+
+    with patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
+        side_effect=GeneralConnectionError(
+            "The requested database could not be opened. Verify that it exists and that the login has permission to access it."
+        ),
+    ):
+        res = runner.invoke(app, ["profile", "test", "restricted-sql"], env=env)
+        assert res.exit_code == 1
+        assert "Error: The requested database could not be opened." in res.output
+        assert "Verify that it exists and that the login has permission to access it." in res.output
+        # Must NOT suggest updating or changing password
+        assert "support profile password set" not in res.output
+        assert "Next step: Update the saved password" not in res.output
+
+
+def test_profile_test_mongodb_with_saved_password_success(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--type",
+            "mongodb",
+            "--name",
+            "prod-mongo",
+            "--uri",
+            "mongodb://localhost:27017/analytics",
+            "--username",
+            "mongouser",
+        ],
+        env=env,
+    )
+    runner.invoke(app, ["profile", "password", "set", "prod-mongo"], input="mongopass\nmongopass\n", env=env)
+
+    mock_result = ConnectionTestResult(
+        success=True,
+        database_type="mongodb",
+        database="analytics",
+        username="mongouser",
+        host="localhost",
+        port=27017,
+        server_version=None,
+    )
+
+    with patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection",
+        return_value=mock_result,
+    ) as mock_test:
+        res = runner.invoke(app, ["profile", "test", "prod-mongo"], env=env)
+        assert res.exit_code == 0
+        assert "Connection succeeded." in res.output
+        assert "Type:        mongodb" in res.output
+        assert "Database:    analytics" in res.output
+        assert "User:        mongouser" in res.output
+        assert "Host:        localhost:27017" in res.output
+        assert "Server:" not in res.output
+        assert "mongopass" not in res.output
+        mock_test.assert_called_once()
+        assert mock_test.call_args.kwargs["password"] == "mongopass"
+
+
+def test_profile_test_mongodb_one_time_password(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--type",
+            "mongodb",
+            "--name",
+            "otp-mongo",
+            "--uri",
+            "mongodb://localhost:27017/testdb",
+            "--username",
+            "app_user",
+        ],
+        env=env,
+    )
+
+    mock_result = ConnectionTestResult(
+        success=True,
+        database_type="mongodb",
+        database="testdb",
+        username="app_user",
+        host="localhost",
+        port=27017,
+    )
+
+    one_time_pw = "temp_mongo_pass_456"
+    with patch("support.cli.profile.connection._is_interactive", return_value=True), patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection", return_value=mock_result
+    ) as mock_test:
+        res = runner.invoke(app, ["profile", "test", "otp-mongo"], input=f"{one_time_pw}\n", env=env)
+        assert res.exit_code == 0
+        assert "Connection succeeded." in res.output
+        assert one_time_pw not in res.output
+        mock_test.assert_called_once()
+        assert mock_test.call_args.kwargs["password"] == one_time_pw
+
+    # Password was not saved
+    status_res = runner.invoke(app, ["profile", "password", "status", "otp-mongo"], env=env)
+    assert "No saved password." in status_res.output
+
+
+def test_profile_test_mongodb_unauthenticated_non_interactive_success(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    runner.invoke(
+        app,
+        [
+            "profile",
+            "add",
+            "--type",
+            "mongodb",
+            "--name",
+            "unauth-mongo",
+            "--uri",
+            "mongodb://localhost:27017/analytics",
+        ],
+        env=env,
+    )
+
+    mock_result = ConnectionTestResult(
+        success=True,
+        database_type="mongodb",
+        database="analytics",
+        host="localhost",
+        port=27017,
+    )
+
+    # In a non-interactive environment, unauthenticated MongoDB must NOT prompt or fail for missing password
+    with patch("support.cli.profile.connection._is_interactive", return_value=False), patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection", return_value=mock_result
+    ) as mock_test:
+        res = runner.invoke(app, ["profile", "test", "unauth-mongo"], env=env)
+        assert res.exit_code == 0
+        assert "Connection succeeded." in res.output
+        assert "Type:        mongodb" in res.output
+        assert "Database:    analytics" in res.output
+        # Verify no credentials were passed
+        mock_test.assert_called_once()
+        assert mock_test.call_args.kwargs["password"] is None
+
+
+def test_profile_test_keyring_retrieval_failure_non_interactive_fails_cleanly(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    _add_test_profile(env, "keyring-fail-headless")
+
+    with patch(
+        "support.application.connection.ConnectionTestWorkflow.resolve_saved_password",
+        side_effect=CredentialRetrievalError("Secure store locked or inaccessible"),
+    ), patch("support.cli.profile.connection._is_interactive", return_value=False):
+        res = runner.invoke(app, ["profile", "test", "keyring-fail-headless"], env=env)
+        assert res.exit_code == 1
+        assert "Error: Failed to retrieve saved password for profile 'keyring-fail-headless'" in res.output
+        assert "Secure store locked or inaccessible" in res.output
+        # Must not produce an unhandled Python traceback
+        assert "Traceback" not in res.output
+
+
+def test_profile_test_keyring_retrieval_failure_interactive_falls_back_to_prompt(tmp_path: Path) -> None:
+    env = {"SUPPORT_HOME": str(tmp_path)}
+    _add_test_profile(env, "keyring-fail-interactive")
+
+    mock_result = ConnectionTestResult(
+        success=True,
+        database_type="postgresql",
+        database="myapp",
+        username="postgres",
+        host="localhost",
+        port=5432,
+        ssl_mode="prefer",
+    )
+
+    fallback_pw = "fallback_secret_789"
+    with patch(
+        "support.application.connection.ConnectionTestWorkflow.resolve_saved_password",
+        side_effect=CredentialRetrievalError("Secure store device I/O error"),
+    ), patch("support.cli.profile.connection._is_interactive", return_value=True), patch(
+        "support.infrastructure.dispatcher.ConnectorDispatcher.test_connection", return_value=mock_result
+    ) as mock_test:
+        res = runner.invoke(app, ["profile", "test", "keyring-fail-interactive"], input=f"{fallback_pw}\n", env=env)
+        assert res.exit_code == 0
+        assert "Warning: Could not retrieve saved password from secure store: Secure store device I/O error" in res.output
+        assert "Falling back to one-time password entry for this connection test." in res.output
+        assert "Connection succeeded." in res.output
+        mock_test.assert_called_once()
+        assert mock_test.call_args.kwargs["password"] == fallback_pw
+
+
+
 
 
 

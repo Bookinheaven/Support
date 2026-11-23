@@ -1,10 +1,11 @@
 """Command-line interface entry point for Support."""
 
 import sys
-
 import typer
 
 from support import __version__
+from support.cli.db import db_app
+from support.cli.model import model_app
 from support.cli.profile import profile_app
 
 APP_NAME = "support"
@@ -15,6 +16,8 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
 )
+app.add_typer(db_app, name="db")
+app.add_typer(model_app, name="model")
 app.add_typer(profile_app, name="profile")
 
 
@@ -23,6 +26,11 @@ def version_callback(value: bool) -> None:
     if value:
         typer.echo(f"{APP_NAME} version {__version__}")
         raise typer.Exit()
+
+
+def _is_interactive_terminal() -> bool:
+    """Check whether both standard input and standard output are connected to a terminal."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 @app.callback(invoke_without_command=True)
@@ -39,11 +47,16 @@ def main(
 ) -> None:
     """Root entry point for the Support CLI."""
     if ctx.invoked_subcommand is None:
-        typer.echo(
-            f"Welcome to Support (v{__version__})\n"
-            "An AI-assisted database intelligence and operations workspace.\n\n"
-            "Run 'support --help' to see available options."
-        )
+        if _is_interactive_terminal():
+            from support.cli.workspace import run_workspace
+
+            run_workspace()
+        else:
+            typer.echo(
+                f"Welcome to Support (v{__version__})\n"
+                "An AI-assisted database intelligence and operations workspace.\n\n"
+                "Run 'support --help' to see available options."
+            )
 
 
 def cli() -> None:

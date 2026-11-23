@@ -303,6 +303,18 @@ def test_version_2_schema_rejected_without_modification(tmp_path: Path) -> None:
     assert len(rows) == 1, "Existing profile rows must remain untouched"
 
 
+def test_delete_from_nonexistent_profile_store_does_not_create_file(tmp_path: Path) -> None:
+    nonexistent_db = tmp_path / "never_created.sqlite3"
+    assert not nonexistent_db.exists()
+
+    repo = SQLiteProfileRepository(nonexistent_db)
+    with pytest.raises(ProfileNotFoundError, match="Profile 'phantom' not found"):
+        repo.delete("phantom")
+
+    # Crucial check: delete() must not have created the database file
+    assert not nonexistent_db.exists()
+
+
 def test_version_1_nullable_id_schema_rejected(tmp_path: Path) -> None:
     db_path = tmp_path / "profiles.sqlite3"
     conn = sqlite3.connect(str(db_path))
@@ -380,7 +392,7 @@ def test_multi_database_serialization_round_trip(tmp_path: Path) -> None:
         MariaDBConnection(database="mariadb", username="mariauser", ssl_mode="prefer"),
         SQLiteConnection(database_path="/var/data/app.db"),
         SQLServerConnection(database="sqlsrv", username="sa", encrypt=False),
-        MongoDBConnection(database="mongodb", username="mongouser", tls=True),
+        MongoDBConnection(database="mongodb", username="mongouser", uri="mongodb://localhost:27017/mongodb"),
     ]
 
     for i, cfg in enumerate(configs):
@@ -427,3 +439,33 @@ def test_malformed_json_config_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ProfileStorageError, match="Malformed JSON"):
         repo.get_by_name("bad-json")
+
+
+def test_obsolete_mongodb_configuration_rejected_with_clear_error(tmp_path: Path) -> None:
+    import json
+    db_path = tmp_path / "profiles.sqlite3"
+    repo = SQLiteProfileRepository(db_path)
+    repo.add(_make_profile(name="seed"))
+
+    legacy_json = json.dumps({
+        "database": "old_db",
+        "username": "old_user",
+        "host": "localhost",
+        "port": 27017,
+        "auth_source": "admin",
+        "tls": False,
+    })
+
+    conn = sqlite3.connect(str(db_path))
+    with conn:
+        conn.execute(
+            "INSERT INTO profiles (id, name, database_type, connection_config) VALUES (?, ?, ?, ?);",
+            (str(uuid4()), "legacy-mongo", "mongodb", legacy_json),
+        )
+    conn.close()
+
+    with pytest.raises(
+        ProfileStorageError,
+        match="Profile configuration for MongoDB is obsolete and must be recreated",
+    ):
+        repo.get_by_name("legacy-mongo")

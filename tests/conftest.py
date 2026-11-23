@@ -27,13 +27,17 @@ class GlobalFakeKeyringBackend(keyring.backend.KeyringBackend):
         del self.passwords[(service, username)]
 
 
+# Common alias for tests reusing the fake keyring backend
+FakeKeyringBackend = GlobalFakeKeyringBackend
+
+
 @pytest.fixture(autouse=True)
 def isolated_cli_credential_store(monkeypatch: pytest.MonkeyPatch) -> KeyringCredentialStore:
     """Ensure no CLI test ever calls the real OS credential store."""
     backend = GlobalFakeKeyringBackend()
     fake_store = KeyringCredentialStore(backend=backend, allow_test_backend=True)
     monkeypatch.setattr(
-        "support.cli.profile.KeyringCredentialStore",
+        "support.cli.composition.KeyringCredentialStore",
         lambda *args, **kwargs: fake_store,
     )
     return fake_store

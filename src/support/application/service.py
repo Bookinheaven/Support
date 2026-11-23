@@ -30,30 +30,9 @@ class ProfileService:
     def add_profile(
         self,
         name: str,
-        connection: ConnectionConfig | None = None,
-        *,
-        database: str | None = None,
-        username: str | None = None,
-        ssl_mode: str | None = None,
-        host: str = "localhost",
-        port: int = 5432,
+        connection: ConnectionConfig,
     ) -> DatabaseProfile:
-        """Create and store a new database profile.
-
-        Accepts either a fully formed ConnectionConfig or PostgreSQL-specific keyword arguments.
-        """
-        if connection is None:
-            if database is None or username is None or ssl_mode is None:
-                raise ProfileValidationError(
-                    "Either connection or database, username, and ssl_mode must be provided."
-                )
-            connection = PostgresConnection(
-                database=database,
-                username=username,
-                ssl_mode=ssl_mode,
-                host=host,
-                port=port,
-            )
+        """Create and store a new database profile."""
         profile = DatabaseProfile(name=name, connection=connection)
         self._repository.add(profile)
         return profile
@@ -86,7 +65,7 @@ class ProfileService:
             raise ProfileValidationError(f"Profile '{name}' uses SQLite, which does not support passwords.")
         if self._credential_store is None:
             raise CredentialStoreUnavailableError("No credential store configured.")
-        self._credential_store.set(profile.id, password)
+        self._credential_store.store_password(profile.id, password)
 
     def get_profile_password(self, name: str) -> str | None:
         """Retrieve the saved password for the named profile."""
@@ -95,7 +74,7 @@ class ProfileService:
             return None
         if self._credential_store is None:
             raise CredentialStoreUnavailableError("No credential store configured.")
-        return self._credential_store.get(profile.id)
+        return self._credential_store.get_password(profile.id)
 
     def has_profile_password(self, name: str) -> bool:
         """Check whether a password is saved for the named profile without retrieving it."""
@@ -104,7 +83,7 @@ class ProfileService:
             return False
         if self._credential_store is None:
             raise CredentialStoreUnavailableError("No credential store configured.")
-        return self._credential_store.contains(profile.id)
+        return self._credential_store.has_password(profile.id)
 
     def remove_profile_password(self, name: str) -> None:
         """Remove the saved password for the named profile."""
@@ -113,7 +92,7 @@ class ProfileService:
             return
         if self._credential_store is None:
             raise CredentialStoreUnavailableError("No credential store configured.")
-        self._credential_store.delete(profile.id)
+        self._credential_store.delete_password(profile.id)
 
     def remove_profile(self, name: str) -> None:
         """Remove a profile and its saved credentials.
@@ -128,7 +107,7 @@ class ProfileService:
 
         # Only delete credential if database type uses credentials
         if profile.connection.database_type != DatabaseType.SQLITE and self._credential_store is not None:
-            self._credential_store.delete(profile.id)
+            self._credential_store.delete_password(profile.id)
 
         try:
             self._repository.delete(name)

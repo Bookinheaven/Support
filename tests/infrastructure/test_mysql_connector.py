@@ -5,10 +5,11 @@ from __future__ import annotations
 import socket
 import ssl
 from unittest.mock import MagicMock, patch
-import pymysql
+import pytest
+
+pymysql = pytest.importorskip("pymysql")
 import pymysql.constants.CR as CR
 import pymysql.constants.ER as ER
-import pytest
 
 from support.application.errors import (
     AuthenticationFailedError,

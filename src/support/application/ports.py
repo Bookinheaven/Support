@@ -1,10 +1,15 @@
 """Application ports / protocols for profile persistence and connectivity."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
-from support.domain.profiles import ConnectionConfig, DatabaseProfile
+if TYPE_CHECKING:
+    from support.domain.assistant import ChatMessage, ModelInfo, ToolDefinition
+    from support.domain.profiles import ConnectionConfig, DatabaseProfile
+    from support.domain.schema import DatabaseSchema, TableMetadata
 
 
 class ProfileRepository(Protocol):
@@ -34,36 +39,20 @@ class ProfileRepository(Protocol):
 class CredentialStore(Protocol):
     """Protocol for secure profile credential storage."""
 
-    def set(self, profile_id: UUID, password: str) -> None:
+    def store_password(self, profile_id: UUID, password: str) -> None:
         """Securely store a password for the given profile ID."""
         ...
 
-    def get(self, profile_id: UUID) -> str | None:
+    def get_password(self, profile_id: UUID) -> str | None:
         """Retrieve the password for the given profile ID, or None if absent."""
         ...
 
-    def delete(self, profile_id: UUID) -> None:
+    def delete_password(self, profile_id: UUID) -> None:
         """Delete the password for the given profile ID. Idempotent: absent credentials do not raise."""
         ...
 
-    def contains(self, profile_id: UUID) -> bool:
-        """Check whether a password exists for the given profile ID without revealing it."""
-        ...
-
-    def store_password(self, profile_id: UUID, password: str) -> None:
-        """Alias for set."""
-        ...
-
-    def get_password(self, profile_id: UUID) -> str | None:
-        """Alias for get."""
-        ...
-
-    def delete_password(self, profile_id: UUID) -> None:
-        """Alias for delete."""
-        ...
-
     def has_password(self, profile_id: UUID) -> bool:
-        """Alias for contains."""
+        """Check whether a password exists for the given profile ID without revealing it."""
         ...
 
 
@@ -91,4 +80,47 @@ class DatabaseConnector(Protocol):
         password: str | None = None,
     ) -> ConnectionTestResult:
         """Connect to the database, verify with test query, and return result."""
+        ...
+
+
+class SchemaIntrospector(Protocol):
+    """Protocol for database schema introspection operations."""
+
+    def introspect_schema(
+        self,
+        connection: ConnectionConfig,
+        password: str | None = None,
+    ) -> DatabaseSchema:
+        """Introspect complete database schema and return normalized metadata."""
+        ...
+
+    def introspect_table(
+        self,
+        connection: ConnectionConfig,
+        table_name: str,
+        schema: str | None = None,
+        password: str | None = None,
+    ) -> TableMetadata:
+        """Introspect a single table, view, or collection."""
+        ...
+
+
+class LLMProvider(Protocol):
+    """Protocol for local language model provider operations."""
+
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> ChatMessage:
+        """Send multi-turn chat messages with optional tool definitions and return model response."""
+        ...
+
+    def check_model_status(self, model: str | None = None) -> ModelInfo:
+        """Inspect local model availability and tool-calling capability."""
+        ...
+
+    def list_models(self) -> list[ModelInfo]:
+        """List all installed local models."""
         ...

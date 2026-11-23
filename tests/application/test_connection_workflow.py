@@ -4,8 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-import keyring.backend
-import keyring.errors
 import pytest
 
 from support.application.connection import ConnectionTestWorkflow
@@ -17,26 +15,7 @@ from support.application.ports import ConnectionTestResult
 from support.domain.profiles import DatabaseProfile, PostgresConnection
 from support.infrastructure.keyring_credentials import KeyringCredentialStore
 from support.infrastructure.sqlite_profiles import SQLiteProfileRepository
-
-
-class FakeKeyringBackend(keyring.backend.KeyringBackend):
-    """Deterministic in-memory keyring backend for tests."""
-
-    priority = 1
-
-    def __init__(self) -> None:
-        self.passwords: dict[tuple[str, str], str] = {}
-
-    def set_password(self, service: str, username: str, password: str) -> None:
-        self.passwords[(service, username)] = password
-
-    def get_password(self, service: str, username: str) -> str | None:
-        return self.passwords.get((service, username))
-
-    def delete_password(self, service: str, username: str) -> None:
-        if (service, username) not in self.passwords:
-            raise keyring.errors.PasswordDeleteError("Password not found")
-        del self.passwords[(service, username)]
+from tests.conftest import FakeKeyringBackend
 
 
 def _create_workflow(tmp_path: Path) -> tuple[ConnectionTestWorkflow, SQLiteProfileRepository, KeyringCredentialStore, MagicMock]:
@@ -65,7 +44,7 @@ def test_test_profile_connection_success(tmp_path: Path) -> None:
     conn = PostgresConnection(database="app_db", username="app_user", ssl_mode="prefer")
     profile = DatabaseProfile(name="test-profile", connection=conn)
     repo.add(profile)
-    cred_store.set(profile.id, "saved-secret")
+    cred_store.store_password(profile.id, "saved-secret")
 
     expected_result = ConnectionTestResult(
         success=True,
@@ -101,3 +80,15 @@ def test_test_profile_preserves_used_saved_password_on_auth_failure(tmp_path: Pa
         workflow.test_profile_connection("fail-auth", password="wrong", used_saved_password=True)
 
     assert exc_info.value.used_saved_password is True
+
+
+def test_test_profile_requires_explicit_or_saved_password(tmp_path: Path) -> None:
+    workflow, repo, _, connector = _create_workflow(tmp_path)
+
+    conn = PostgresConnection(database="app_db", username="app_user", ssl_mode="prefer")
+    profile = DatabaseProfile(name="no-pass", connection=conn)
+    repo.add(profile)
+
+    # Calling without password passes password=None to connector
+    workflow.test_profile_connection("no-pass", password=None, used_saved_password=False)
+    connector.test_connection.assert_called_once_with(conn, password=None)

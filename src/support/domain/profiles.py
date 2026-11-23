@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import re
 from typing import Union
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 
@@ -21,8 +22,6 @@ class DatabaseType(StrEnum):
 POSTGRES_SUPPORTED_SSL_MODES: frozenset[str] = frozenset(
     {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
-# Backward-compatible alias for existing imports
-SUPPORTED_SSL_MODES: frozenset[str] = POSTGRES_SUPPORTED_SSL_MODES
 
 MYSQL_SUPPORTED_SSL_MODES: frozenset[str] = frozenset(
     {"disabled", "preferred", "required", "verify_ca", "verify_identity"}
@@ -42,6 +41,15 @@ class ProfileValidationError(ValueError):
 def _validate_non_empty_str(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ProfileValidationError(f"{field_name} is required and cannot be empty.")
+
+
+def requires_credentials(connection: ConnectionConfig) -> bool:
+    """Determine whether a database connection profile requires or supports credentials."""
+    if connection.database_type == DatabaseType.SQLITE:
+        return False
+    if connection.database_type == DatabaseType.MONGODB and getattr(connection, "username", None) is None:
+        return False
+    return True
 
 
 def _validate_port(port: int) -> None:
@@ -186,6 +194,10 @@ class SQLiteConnection:
     def database_type(self) -> DatabaseType:
         return DatabaseType.SQLITE
 
+    @property
+    def is_memory(self) -> bool:
+        return self.database_path == ":memory:"
+
     def __post_init__(self) -> None:
         _validate_non_empty_str(self.database_path, "Database path")
 
@@ -230,44 +242,113 @@ class SQLServerConnection:
             )
 
 
+SECRET_BEARING_URI_OPTIONS: frozenset[str] = frozenset(
+    {
+        "tlscertificatekeyfilepassword",
+        "sslcertificatekeyfilepassword",
+        "proxypassword",
+        "authmechanismproperties",
+    }
+)
+
+
 @dataclass(frozen=True)
 class MongoDBConnection:
     """MongoDB connection configuration.
 
     Attributes:
-        database: Target database name (required).
+        database: Target database name (default: 'admin').
+        uri: MongoDB deployment connection string (standard or SRV) without embedded credentials (default: 'mongodb://localhost:27017').
         username: Database login user (optional).
-        host: Database host name or IP address (default: 'localhost').
-        port: Database port number between 1 and 65535 (default: 27017).
-        auth_source: Authentication database (default: 'admin').
-        tls: Whether to use TLS encryption (default: False).
     """
 
-    database: str
+    database: str = "admin"
+    uri: str = "mongodb://localhost:27017"
     username: str | None = None
-    host: str = "localhost"
-    port: int = 27017
-    auth_source: str = "admin"
-    tls: bool = False
 
     @property
     def database_type(self) -> DatabaseType:
         return DatabaseType.MONGODB
 
+    @property
+    def host(self) -> str:
+        """Extract primary hostname or cluster domain from URI."""
+        parsed = urlsplit(self.uri)
+        return parsed.hostname or (parsed.netloc.split(":")[0] if parsed.netloc else "localhost")
+
+    @property
+    def port(self) -> int | None:
+        """Extract port from URI if explicitly specified."""
+        parsed = urlsplit(self.uri)
+        try:
+            return parsed.port
+        except ValueError:
+            return None
+
+    @property
+    def auth_source(self) -> str:
+        """Resolve effective authentication database per MongoDB URI specification."""
+        parsed = urlsplit(self.uri)
+        query_params = parse_qs(parsed.query)
+        if "authSource" in query_params and query_params["authSource"]:
+            return query_params["authSource"][0]
+        if parsed.path and parsed.path != "/":
+            path_db = parsed.path.lstrip("/").split("/")[0].split("?")[0].strip()
+            if path_db:
+                return path_db
+        return "admin"
+
     def __post_init__(self) -> None:
+        _validate_non_empty_str(self.uri, "URI")
         _validate_non_empty_str(self.database, "Database name")
-        _validate_non_empty_str(self.host, "Host")
-        _validate_port(self.port)
-        _validate_non_empty_str(self.auth_source, "Auth source")
+
+        parsed = urlsplit(self.uri)
+        if parsed.scheme not in ("mongodb", "mongodb+srv"):
+            raise ProfileValidationError(
+                f"Unsupported MongoDB URI scheme '{parsed.scheme}'. Scheme must be 'mongodb://' or 'mongodb+srv://'."
+            )
+
+        if not parsed.netloc:
+            raise ProfileValidationError("MongoDB connection URI must include a host or cluster address.")
+
+        # Security check: forbid embedded credentials in URI
+        if parsed.username or parsed.password or "@" in parsed.netloc:
+            raise ProfileValidationError(
+                "MongoDB connection URI must not contain embedded credentials (username or password). "
+                "Store credentials securely using: support profile password set <NAME>"
+            )
+
+        # Security check: forbid secret-bearing query options
+        if parsed.query:
+            query_params = parse_qs(parsed.query)
+            for param in query_params:
+                if param.lower() in SECRET_BEARING_URI_OPTIONS:
+                    raise ProfileValidationError(
+                        f"Secret-bearing URI option '{param}' is not permitted in MongoDB profile URIs. "
+                        "Authentication credentials must be managed via: support profile password set <NAME>"
+                    )
+
+        # SRV validation: mongodb+srv URIs must not contain a port
+        if parsed.scheme == "mongodb+srv":
+            if ":" in parsed.netloc:
+                raise ProfileValidationError(
+                    "MongoDB SRV connection URI ('mongodb+srv://') must not specify a port."
+                )
+
+        # If URI contains a database path, reconcile with self.database
+        if parsed.path and parsed.path != "/":
+            path_db = parsed.path.lstrip("/").split("/")[0].split("?")[0].strip()
+            if path_db:
+                if self.database == "admin" and path_db != "admin":
+                    object.__setattr__(self, "database", path_db)
+                elif self.database != "admin" and self.database != path_db:
+                    raise ProfileValidationError(
+                        f"Conflicting database names: URI specifies '{path_db}' but database is '{self.database}'."
+                    )
 
         if self.username is not None:
             if not isinstance(self.username, str) or not self.username.strip():
                 raise ProfileValidationError("Username cannot be empty when provided.")
-
-        if not isinstance(self.tls, bool):
-            raise ProfileValidationError(
-                f"tls must be a boolean, got {type(self.tls).__name__}."
-            )
 
 
 ConnectionConfig = Union[
@@ -307,6 +388,11 @@ class DatabaseProfile:
     def database_type(self) -> DatabaseType:
         """Convenience accessor for connection database type."""
         return self.connection.database_type
+
+    @property
+    def requires_credentials(self) -> bool:
+        """Convenience accessor indicating whether the profile connection uses credentials."""
+        return requires_credentials(self.connection)
 
     def __post_init__(self) -> None:
         # Validate name

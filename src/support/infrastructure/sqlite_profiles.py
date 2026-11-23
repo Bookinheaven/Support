@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
-import json
 import os
 from pathlib import Path
 import sqlite3
@@ -19,121 +18,26 @@ from support.application.errors import (
 from support.domain.profiles import (
     ConnectionConfig,
     DatabaseProfile,
-    DatabaseType,
-    MariaDBConnection,
-    MongoDBConnection,
-    MySQLConnection,
-    PostgresConnection,
-    ProfileValidationError,
-    SQLiteConnection,
-    SQLServerConnection,
 )
 from support.infrastructure.config import get_database_path
+from support.infrastructure.profile_config_codec import (
+    deserialize_connection_config,
+    serialize_connection_config,
+)
 
 CURRENT_SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 5000
 
 
-def serialize_connection_config(connection: ConnectionConfig) -> tuple[str, str]:
-    """Serialize connection configuration to (database_type, config_json)."""
-    db_type = connection.database_type.value
-    if isinstance(connection, PostgresConnection):
-        data = {
-            "database": connection.database,
-            "username": connection.username,
-            "ssl_mode": connection.ssl_mode,
-            "host": connection.host,
-            "port": connection.port,
-        }
-    elif isinstance(connection, MySQLConnection):
-        data = {
-            "database": connection.database,
-            "username": connection.username,
-            "host": connection.host,
-            "port": connection.port,
-            "ssl_mode": connection.ssl_mode,
-        }
-    elif isinstance(connection, MariaDBConnection):
-        data = {
-            "database": connection.database,
-            "username": connection.username,
-            "host": connection.host,
-            "port": connection.port,
-            "ssl_mode": connection.ssl_mode,
-        }
-    elif isinstance(connection, SQLiteConnection):
-        data = {
-            "database_path": connection.database_path,
-        }
-    elif isinstance(connection, SQLServerConnection):
-        data = {
-            "database": connection.database,
-            "username": connection.username,
-            "host": connection.host,
-            "port": connection.port,
-            "encrypt": connection.encrypt,
-            "trust_server_certificate": connection.trust_server_certificate,
-        }
-    elif isinstance(connection, MongoDBConnection):
-        data = {
-            "database": connection.database,
-            "username": connection.username,
-            "host": connection.host,
-            "port": connection.port,
-            "auth_source": connection.auth_source,
-            "tls": connection.tls,
-        }
-    else:
-        raise ProfileStorageError(
-            f"Unsupported connection configuration type: {type(connection).__name__}"
-        )
-
-    return db_type, json.dumps(data, sort_keys=True)
-
-
-def deserialize_connection_config(database_type: str, config_json: str) -> ConnectionConfig:
-    """Deserialize (database_type, config_json) into a typed ConnectionConfig."""
-    try:
-        data = json.loads(config_json)
-        if not isinstance(data, dict):
-            raise ProfileStorageError("Connection configuration JSON must be an object.")
-    except json.JSONDecodeError as exc:
-        raise ProfileStorageError(f"Malformed JSON in connection configuration: {exc}") from exc
-
-    try:
-        db_type = DatabaseType(database_type)
-    except ValueError as exc:
-        raise ProfileStorageError(f"Unknown database type '{database_type}'.") from exc
-
-    try:
-        if db_type == DatabaseType.POSTGRESQL:
-            return PostgresConnection(**data)
-        elif db_type == DatabaseType.MYSQL:
-            return MySQLConnection(**data)
-        elif db_type == DatabaseType.MARIADB:
-            return MariaDBConnection(**data)
-        elif db_type == DatabaseType.SQLITE:
-            return SQLiteConnection(**data)
-        elif db_type == DatabaseType.SQLSERVER:
-            return SQLServerConnection(**data)
-        elif db_type == DatabaseType.MONGODB:
-            return MongoDBConnection(**data)
-    except (TypeError, ProfileValidationError) as exc:
-        raise ProfileStorageError(
-            f"Invalid connection configuration for '{database_type}': {exc}"
-        ) from exc
-    raise ProfileStorageError(f"Unsupported database type '{database_type}'.")
-
-
 class SQLiteProfileRepository:
-    """SQLite-backed profile repository adhering to the ProfileRepository protocol."""
+    """SQLite-backed repository for storing and managing database profiles."""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
-        self._db_path = get_database_path(db_path)
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path if db_path is not None else get_database_path()
 
     @property
-    def db_path(self) -> Path:
-        """Return the resolved database path."""
+    def database_path(self) -> Path:
+        """Return the active SQLite database path."""
         return self._db_path
 
     def _ensure_parent_directory(self) -> None:
@@ -359,12 +263,11 @@ class SQLiteProfileRepository:
                 rows = cursor.fetchall()
                 return [self._row_to_profile(row) for row in rows]
         except sqlite3.Error as exc:
-            raise ProfileStorageError(f"Failed to list profiles: {exc}") from exc
+            raise ProfileStorageError(
+                f"Failed to list profiles: {exc}"
+            ) from exc
 
     def update(self, profile: DatabaseProfile) -> None:
-        if not self._db_path.exists():
-            raise ProfileNotFoundError(f"Profile with ID '{profile.id}' not found.")
-
         db_type, config_json = serialize_connection_config(profile.connection)
         query = """
         UPDATE profiles
@@ -382,9 +285,7 @@ class SQLiteProfileRepository:
                 with conn:
                     cursor = conn.execute(query, params)
                     if cursor.rowcount == 0:
-                        raise ProfileNotFoundError(
-                            f"Profile with ID '{profile.id}' not found."
-                        )
+                        raise ProfileNotFoundError(f"Profile '{profile.name}' not found.")
         except sqlite3.IntegrityError as exc:
             err_msg = str(exc).lower()
             if "profiles.name" in err_msg or ("unique" in err_msg and "name" in err_msg):

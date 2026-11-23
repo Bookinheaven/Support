@@ -1,10 +1,10 @@
 """Tests for PostgresConnector infrastructure component."""
 
 from unittest.mock import MagicMock, patch
-
-import psycopg
-import psycopg.errors
 import pytest
+
+psycopg = pytest.importorskip("psycopg")
+import psycopg.errors
 
 from support.application.errors import (
     AuthenticationFailedError,

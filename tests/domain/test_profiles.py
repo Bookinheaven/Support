@@ -7,9 +7,11 @@ import pytest
 
 from support.domain.profiles import (
     DatabaseProfile,
+    DatabaseType,
+    MongoDBConnection,
     PostgresConnection,
     ProfileValidationError,
-    SUPPORTED_SSL_MODES,
+    POSTGRES_SUPPORTED_SSL_MODES,
 )
 
 
@@ -72,7 +74,7 @@ def test_postgres_connection_missing_required_fields(empty_val: str) -> None:
 
 
 # 4. PostgresConnection SSL mode validation
-@pytest.mark.parametrize("ssl_mode", list(SUPPORTED_SSL_MODES))
+@pytest.mark.parametrize("ssl_mode", list(POSTGRES_SUPPORTED_SSL_MODES))
 def test_postgres_connection_supported_ssl_modes(ssl_mode: str) -> None:
     conn = _sample_connection(ssl_mode=ssl_mode)
     assert conn.ssl_mode == ssl_mode
@@ -234,7 +236,97 @@ def test_multi_database_connection_models_valid() -> None:
     mongo = MongoDBConnection(database="db")
     assert mongo.database_type == DatabaseType.MONGODB
     assert mongo.port == 27017
+    assert mongo.host == "localhost"
     assert mongo.username is None
+    assert mongo.uri == "mongodb://localhost:27017"
+
+
+def test_mongodb_connection_uri_and_validation() -> None:
+    # 1. Valid standard URI
+    conn1 = MongoDBConnection(database="testdb", uri="mongodb://127.0.0.1:27018/testdb", username="u1")
+    assert conn1.host == "127.0.0.1"
+    assert conn1.port == 27018
+    assert conn1.database == "testdb"
+    assert conn1.username == "u1"
+
+    # 2. Valid SRV URI
+    conn2 = MongoDBConnection(uri="mongodb+srv://cluster.example.mongodb.net/analytics?retryWrites=true")
+    assert conn2.host == "cluster.example.mongodb.net"
+    assert conn2.port is None
+    assert conn2.database == "analytics"
+
+    # 3. Reject embedded username
+    with pytest.raises(ProfileValidationError, match="embedded credentials"):
+        MongoDBConnection(uri="mongodb://admin@localhost:27017")
+
+    # 4. Reject embedded username and password
+    with pytest.raises(ProfileValidationError, match="embedded credentials"):
+        MongoDBConnection(uri="mongodb://admin:pass123@localhost:27017/db")
+
+    # 5. Reject SRV URI with explicit port
+    with pytest.raises(ProfileValidationError, match="must not specify a port"):
+        MongoDBConnection(uri="mongodb+srv://cluster.example.net:27017")
+
+    # 6. Reject invalid scheme
+    with pytest.raises(ProfileValidationError, match="Unsupported MongoDB URI scheme"):
+        MongoDBConnection(uri="http://localhost:27017")
+
+    # 7. Reject empty host
+    with pytest.raises(ProfileValidationError, match="must include a host"):
+        MongoDBConnection(uri="mongodb://")
+
+    # 8. Reject empty username when provided
+    with pytest.raises(ProfileValidationError, match="Username cannot be empty"):
+        MongoDBConnection(username="   ")
+
+
+def test_mongodb_target_database_versus_auth_source() -> None:
+    # Scenario 1: URI contains /analytics?authSource=admin
+    # Target database is analytics, authentication database is explicitly admin
+    c1 = MongoDBConnection(uri="mongodb://localhost:27017/analytics?authSource=admin")
+    assert c1.database == "analytics"
+    assert c1.auth_source == "admin"
+
+    # Scenario 2: URI contains /analytics but no authSource
+    # Target database is analytics, authentication database defaults to path database (analytics)
+    c2 = MongoDBConnection(uri="mongodb://localhost:27017/analytics")
+    assert c2.database == "analytics"
+    assert c2.auth_source == "analytics"
+
+    # Scenario 3: URI contains no database path and no authSource
+    # Target database is default admin, authentication database defaults to admin
+    c3 = MongoDBConnection(uri="mongodb://localhost:27017")
+    assert c3.database == "admin"
+    assert c3.auth_source == "admin"
+
+    # Scenario 4: database="analytics" configured separately while URI has no database path
+    # Target database is analytics, authentication database defaults to admin (pathless URI specification)
+    c4 = MongoDBConnection(database="analytics", uri="mongodb://localhost:27017")
+    assert c4.database == "analytics"
+    assert c4.auth_source == "admin"
+
+
+def test_mongodb_rejects_secret_bearing_uri_options() -> None:
+    # 1. tlsCertificateKeyFilePassword
+    with pytest.raises(ProfileValidationError, match="Secret-bearing URI option 'tlsCertificateKeyFilePassword'"):
+        MongoDBConnection(uri="mongodb://localhost:27017/?tlsCertificateKeyFilePassword=my_cert_pass")
+
+    # 2. sslCertificateKeyFilePassword
+    with pytest.raises(ProfileValidationError, match="Secret-bearing URI option 'sslCertificateKeyFilePassword'"):
+        MongoDBConnection(uri="mongodb://localhost:27017/?sslCertificateKeyFilePassword=my_cert_pass")
+
+    # 3. proxyPassword
+    with pytest.raises(ProfileValidationError, match="Secret-bearing URI option 'proxyPassword'"):
+        MongoDBConnection(uri="mongodb://localhost:27017/?proxyPassword=my_proxy_secret")
+
+    # 4. authMechanismProperties
+    with pytest.raises(ProfileValidationError, match="Secret-bearing URI option 'authMechanismProperties'"):
+        MongoDBConnection(uri="mongodb://localhost:27017/?authMechanismProperties=AWS_SESSION_TOKEN:token123")
+
+    # Non-secret options are preserved without errors
+    allowed = MongoDBConnection(uri="mongodb://localhost:27017/analytics?replicaSet=rs0&tls=true&retryWrites=true&authSource=admin")
+    assert allowed.database == "analytics"
+    assert allowed.auth_source == "admin"
 
 
 def test_database_profile_supports_all_connection_types_and_rename() -> None:

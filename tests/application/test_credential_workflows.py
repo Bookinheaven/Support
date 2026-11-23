@@ -4,8 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import keyring.backend
-import keyring.errors
 import pytest
 
 from support.application.errors import (
@@ -14,28 +12,10 @@ from support.application.errors import (
     ProfileStorageError,
 )
 from support.application.service import ProfileService
+from support.domain.profiles import PostgresConnection
 from support.infrastructure.keyring_credentials import KeyringCredentialStore
 from support.infrastructure.sqlite_profiles import SQLiteProfileRepository
-
-
-class FakeKeyringBackend(keyring.backend.KeyringBackend):
-    """Deterministic in-memory keyring backend for tests."""
-
-    priority = 1
-
-    def __init__(self) -> None:
-        self.passwords: dict[tuple[str, str], str] = {}
-
-    def set_password(self, service: str, username: str, password: str) -> None:
-        self.passwords[(service, username)] = password
-
-    def get_password(self, service: str, username: str) -> str | None:
-        return self.passwords.get((service, username))
-
-    def delete_password(self, service: str, username: str) -> None:
-        if (service, username) not in self.passwords:
-            raise keyring.errors.PasswordDeleteError("Password not found")
-        del self.passwords[(service, username)]
+from tests.conftest import FakeKeyringBackend
 
 
 def _create_service(tmp_path: Path) -> tuple[ProfileService, SQLiteProfileRepository, KeyringCredentialStore]:
@@ -67,14 +47,12 @@ def test_profile_rename_preserves_credential_lookup(tmp_path: Path) -> None:
 
     profile = service.add_profile(
         name="initial-name",
-        database="db",
-        username="user",
-        ssl_mode="prefer",
+        connection=PostgresConnection(database="db", username="user", ssl_mode="prefer"),
     )
     service.set_profile_password("initial-name", "super-secret")
 
     # Verify stored by profile.id
-    assert cred_store.get(profile.id) == "super-secret"
+    assert cred_store.get_password(profile.id) == "super-secret"
     assert service.has_profile_password("initial-name")
 
     # Rename profile
@@ -91,18 +69,16 @@ def test_profile_deletion_cleans_up_credential(tmp_path: Path) -> None:
 
     profile = service.add_profile(
         name="to-delete",
-        database="db",
-        username="user",
-        ssl_mode="prefer",
+        connection=PostgresConnection(database="db", username="user", ssl_mode="prefer"),
     )
     service.set_profile_password("to-delete", "pwd123")
-    assert cred_store.contains(profile.id)
+    assert cred_store.has_password(profile.id)
 
     service.remove_profile("to-delete")
 
     assert repo.get_by_name("to-delete") is None
-    assert not cred_store.contains(profile.id)
-    assert cred_store.get(profile.id) is None
+    assert not cred_store.has_password(profile.id)
+    assert cred_store.get_password(profile.id) is None
 
 
 def test_profile_deletion_aborts_if_credential_deletion_fails(tmp_path: Path) -> None:
@@ -110,14 +86,12 @@ def test_profile_deletion_aborts_if_credential_deletion_fails(tmp_path: Path) ->
 
     profile = service.add_profile(
         name="keep-me",
-        database="db",
-        username="user",
-        ssl_mode="prefer",
+        connection=PostgresConnection(database="db", username="user", ssl_mode="prefer"),
     )
     service.set_profile_password("keep-me", "pwd123")
 
     # Simulate credential store failure during deletion
-    cred_store.delete = MagicMock(side_effect=CredentialDeletionError("OS keychain unavailable"))
+    cred_store.delete_password = MagicMock(side_effect=CredentialDeletionError("OS keychain unavailable"))
 
     with pytest.raises(CredentialDeletionError, match="OS keychain unavailable"):
         service.remove_profile("keep-me")
@@ -131,9 +105,7 @@ def test_profile_deletion_reports_sqlite_failure_after_credential_deletion(tmp_p
 
     profile = service.add_profile(
         name="fail-sqlite",
-        database="db",
-        username="user",
-        ssl_mode="prefer",
+        connection=PostgresConnection(database="db", username="user", ssl_mode="prefer"),
     )
     service.set_profile_password("fail-sqlite", "pwd123")
 
@@ -144,4 +116,4 @@ def test_profile_deletion_reports_sqlite_failure_after_credential_deletion(tmp_p
         service.remove_profile("fail-sqlite")
 
     # Credential was removed
-    assert not cred_store.contains(profile.id)
+    assert not cred_store.has_password(profile.id)

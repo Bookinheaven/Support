@@ -38,13 +38,17 @@ class ConnectionTestWorkflow:
         return profile
 
     def resolve_saved_password(self, profile_id: UUID) -> str | None:
-        """Attempt to retrieve saved password for a profile UUID without failing if store is unavailable."""
+        """Attempt to retrieve saved password for a profile UUID.
+
+        Returns:
+            Password string if found, or None if no password exists for the profile.
+
+        Raises:
+            CredentialError: If the credential store is unavailable or retrieval fails.
+        """
         if self._credential_store is None:
             return None
-        try:
-            return self._credential_store.get(profile_id)
-        except CredentialStoreUnavailableError:
-            return None
+        return self._credential_store.get_password(profile_id)
 
     def test_profile_connection(
         self,
